@@ -645,15 +645,18 @@ JSONのみ出力してください。` },
                 <tbody>
                   {enriched.map((e) => (
                     <tr key={e.id} className="border-b border-gray-100 hover:bg-amber-50/40">
-                      <td className="px-2 py-1.5 font-medium max-w-[160px]">
-                        <div className="flex items-center gap-1">
-                          <span className="truncate">{e.food.name}</span>
+                      <td className="px-2 py-1.5 font-medium max-w-[180px]">
+                        <div className="flex items-center gap-1.5">
                           <button onClick={() => startEditFood(e.food)}
-                            className="text-amber-400 hover:text-amber-600 text-[11px] shrink-0" title="編集">&#9998;</button>
+                            className="bg-amber-100 hover:bg-amber-200 text-amber-700 text-[10px] px-1.5 py-0.5 rounded transition shrink-0"
+                            title="編集">編集</button>
+                          <span className="truncate">{e.food.name}</span>
                         </div>
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${e.food.isComplete ? "bg-emerald-100 text-emerald-700" : "bg-gray-100 text-gray-500"}`}>
-                          {e.food.isComplete ? "総合" : "一般"}
-                        </span>
+                        <div className="mt-0.5 ml-9">
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${e.food.isComplete ? "bg-emerald-100 text-emerald-700" : "bg-gray-100 text-gray-500"}`}>
+                            {e.food.isComplete ? "総合" : "一般"}
+                          </span>
+                        </div>
                       </td>
                       <td className="text-center px-1 text-gray-500">{fmt(e.carb)}</td>
                       <td className="text-center px-1">{fmt(e.food.protein)}</td>
