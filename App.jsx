@@ -135,6 +135,8 @@ export default function CatFoodCalculator() {
   const [addAmount, setAddAmount] = useState("");
   const [newFood, setNewFood] = useState({ ...EMPTY_FOOD });
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [editingFoodId, setEditingFoodId] = useState(null);
+  const [editFood, setEditFood] = useState({ ...EMPTY_FOOD });
   const [loaded, setLoaded] = useState(false);
 
   /* ─── Load ─── */
@@ -342,6 +344,31 @@ export default function CatFoodCalculator() {
 
   const removeMasterFood = (id) => {
     saveMaster(foodMaster.filter((f) => f.id !== id));
+  };
+
+  const startEditFood = (f) => {
+    setEditingFoodId(f.id);
+    setEditFood({
+      name: f.name, protein: String(f.protein || ""), fat: String(f.fat || ""),
+      fiber: String(f.fiber || ""), ash: String(f.ash || ""), moisture: String(f.moisture || ""),
+      kcalGrams: "", kcalValue: "", kcalPer100g: f.kcalPer100g || 0, isComplete: !!f.isComplete,
+    });
+  };
+
+  const saveEditFood = () => {
+    const updated = foodMaster.map((f) =>
+      f.id === editingFoodId ? {
+        ...f, name: editFood.name,
+        protein: parseFloat(editFood.protein) || 0, fat: parseFloat(editFood.fat) || 0,
+        fiber: parseFloat(editFood.fiber) || 0, ash: parseFloat(editFood.ash) || 0,
+        moisture: parseFloat(editFood.moisture) || 0, isComplete: editFood.isComplete,
+        kcalPer100g: (parseFloat(editFood.kcalGrams) > 0 && parseFloat(editFood.kcalValue) >= 0)
+          ? (parseFloat(editFood.kcalValue) / parseFloat(editFood.kcalGrams)) * 100
+          : editFood.kcalPer100g,
+      } : f
+    );
+    saveMaster(updated);
+    setEditingFoodId(null);
   };
 
   /* ─── CSV Import ─── */
@@ -869,9 +896,60 @@ export default function CatFoodCalculator() {
                   </summary>
                   <ul className="mt-2 space-y-1">
                     {foodMaster.map((f) => (
-                      <li key={f.id} className="flex items-center justify-between text-sm bg-gray-50 rounded px-3 py-1.5">
-                        <span className="truncate">{f.name}</span>
-                        <button onClick={() => removeMasterFood(f.id)} className="text-red-400 hover:text-red-600 ml-2 shrink-0">削除</button>
+                      <li key={f.id} className="text-sm bg-gray-50 rounded px-3 py-2">
+                        {editingFoodId === f.id ? (
+                          <div className="space-y-2">
+                            <input className="w-full border border-gray-300 rounded px-2 py-1 text-sm focus:ring-1 focus:ring-amber-400 focus:outline-none"
+                              value={editFood.name} onChange={(e) => setEditFood((p) => ({ ...p, name: e.target.value }))} />
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <input type="checkbox" checked={editFood.isComplete}
+                                onChange={(e) => setEditFood((p) => ({ ...p, isComplete: e.target.checked }))}
+                                className="w-3.5 h-3.5 accent-amber-600" />
+                              <span className="text-xs text-gray-600">総合栄養食</span>
+                            </label>
+                            <div className="grid grid-cols-3 gap-1">
+                              {[
+                                { key: "protein", label: "タンパク%" }, { key: "fat", label: "脂質%" },
+                                { key: "fiber", label: "繊維%" }, { key: "ash", label: "灰分%" },
+                                { key: "moisture", label: "水分%" },
+                              ].map(({ key, label }) => (
+                                <input key={key} type="number" step="0.1" min="0" max="100" placeholder={label}
+                                  className="border border-gray-300 rounded px-1.5 py-1 text-xs focus:ring-1 focus:ring-amber-400 focus:outline-none"
+                                  value={editFood[key]} onChange={(e) => setEditFood((p) => ({ ...p, [key]: e.target.value }))} />
+                              ))}
+                            </div>
+                            <div className="flex items-center gap-1 text-xs text-gray-500">
+                              <span>現在: {fmt(editFood.kcalPer100g)} kcal/100g</span>
+                              <span className="mx-1">→ 変更:</span>
+                              <input type="number" step="1" min="0" placeholder="g"
+                                className="w-14 border border-gray-300 rounded px-1 py-0.5 text-xs focus:ring-1 focus:ring-amber-400 focus:outline-none"
+                                value={editFood.kcalGrams} onChange={(e) => setEditFood((p) => ({ ...p, kcalGrams: e.target.value }))} />
+                              <span>gで</span>
+                              <input type="number" step="0.1" min="0" placeholder="kcal"
+                                className="w-14 border border-gray-300 rounded px-1 py-0.5 text-xs focus:ring-1 focus:ring-amber-400 focus:outline-none"
+                                value={editFood.kcalValue} onChange={(e) => setEditFood((p) => ({ ...p, kcalValue: e.target.value }))} />
+                              <span>kcal</span>
+                            </div>
+                            <div className="flex gap-2">
+                              <button onClick={saveEditFood}
+                                className="flex-1 bg-amber-600 hover:bg-amber-700 text-white text-xs py-1.5 rounded transition">保存</button>
+                              <button onClick={() => setEditingFoodId(null)}
+                                className="flex-1 border border-gray-300 text-xs py-1.5 rounded hover:bg-gray-100 transition">キャンセル</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-between">
+                            <div className="truncate">
+                              <span>{f.name}</span>
+                              <span className="text-xs text-gray-400 ml-1">({fmt(f.kcalPer100g)} kcal/100g)</span>
+                              {f.isComplete && <span className="text-[10px] ml-1 px-1 py-0.5 bg-emerald-100 text-emerald-700 rounded-full">総合</span>}
+                            </div>
+                            <div className="flex gap-1 ml-2 shrink-0">
+                              <button onClick={() => startEditFood(f)} className="text-amber-500 hover:text-amber-700 text-xs px-1">編集</button>
+                              <button onClick={() => removeMasterFood(f.id)} className="text-red-400 hover:text-red-600 text-xs px-1">削除</button>
+                            </div>
+                          </div>
+                        )}
                       </li>
                     ))}
                   </ul>
