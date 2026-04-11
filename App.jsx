@@ -389,7 +389,11 @@ export default function CatFoodCalculator() {
       const lines = text.split(/\r?\n/).filter((l) => l.trim());
       if (lines.length < 2) { alert("CSVにデータ行がありません"); return; }
 
-      const header = lines[0].split(",").map((h) => h.trim());
+      // Find header row (auto-detect: look for a line containing "商品名")
+      let headerIdx = lines.findIndex((l) => /商品名|name/i.test(l));
+      if (headerIdx < 0) { alert("「商品名」列が見つかりません"); return; }
+
+      const header = lines[headerIdx].split(",").map((h) => h.trim());
       const nameIdx = header.findIndex((h) => /商品名|name/i.test(h));
       const proteinIdx = header.findIndex((h) => /タンパク|protein/i.test(h));
       const fatIdx = header.findIndex((h) => /脂質|fat/i.test(h));
@@ -399,13 +403,11 @@ export default function CatFoodCalculator() {
       const kcalIdx = header.findIndex((h) => /kcal.*100|カロリー/i.test(h));
       const completeIdx = header.findIndex((h) => /総合栄養食|complete/i.test(h));
 
-      if (nameIdx < 0) { alert("「商品名」列が見つかりません"); return; }
-
       let imported = 0, skipped = 0;
       const existingNames = new Set(foodMaster.map((f) => f.name));
       const newItems = [];
 
-      for (let i = 1; i < lines.length; i++) {
+      for (let i = headerIdx + 1; i < lines.length; i++) {
         const cols = lines[i].split(",").map((c) => c.trim());
         const name = cols[nameIdx];
         if (!name) continue;
