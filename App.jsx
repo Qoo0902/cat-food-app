@@ -580,6 +580,14 @@ export default function CatFoodCalculator() {
             </div>
           )}
 
+          {/* New menu button */}
+          <button
+            onClick={() => { setPetName(""); setWeight(""); setMenuItems([]); }}
+            className="w-full bg-white border-2 border-gray-300 text-gray-600 hover:bg-gray-50 py-3 rounded-xl font-medium transition flex items-center justify-center gap-2"
+          >
+            <span>✨</span> 新しいメニューを作る
+          </button>
+
           {/* Export & Reset row */}
           <div className="flex justify-between items-center">
             <button
