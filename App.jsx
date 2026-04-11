@@ -140,8 +140,10 @@ export default function CatFoodCalculator() {
   /* ─── Load ─── */
   useEffect(() => {
     (async () => {
-      const master = await store.get("food-master");
-      if (master) setFoodMaster(master);
+      const master = await store.get("food-master") || [];
+      const WATER = { id: "__water__", name: "水", protein: 0, fat: 0, fiber: 0, ash: 0, moisture: 100, kcalPer100g: 0, isComplete: false };
+      if (!master.find((f) => f.id === "__water__")) master.unshift(WATER);
+      setFoodMaster(master);
 
       const current = await store.get("current-menu");
       if (current) {
