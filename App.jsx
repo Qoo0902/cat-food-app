@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import Tesseract from "tesseract.js";
 
 /* ─── Storage abstraction ─── */
 const store = {
@@ -438,27 +439,22 @@ export default function CatFoodCalculator() {
     await store.set("gemini-api-key", key);
   }, []);
 
-  /* ─── Scan food label image ─── */
-  const scanFoodLabel = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (!geminiKey) { alert("Gemini APIキーを設定してください（ページ下部の⚙設定）"); return; }
-    setScanning(true);
-    try {
-      const base64 = await new Promise((resolve) => {
-        const r = new FileReader();
-        r.onload = () => resolve(r.result.split(",")[1]);
-        r.readAsDataURL(file);
-      });
-      const resp = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{
-              parts: [
-                { text: `この画像はキャットフードの成分表です。以下のJSON形式で数値を抽出してください。
+  /* ─── Scan food label image (Gemini or Tesseract) ─── */
+  const scanWithGemini = async (file) => {
+    const base64 = await new Promise((resolve) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result.split(",")[1]);
+      r.readAsDataURL(file);
+    });
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { text: `この画像はキャットフードの成分表です。以下のJSON形式で数値を抽出してください。
 数値が見つからない項目は0にしてください。商品名も読み取れれば入れてください。
 カロリーは「○○gあたり○○kcal」の形で読み取り、kcalGramsとkcalValueに入れてください。
 {
@@ -472,17 +468,57 @@ export default function CatFoodCalculator() {
   "kcalValue": カロリー表記の何kcalの部分
 }
 JSONのみ出力してください。` },
-                { inlineData: { mimeType: file.type, data: base64 } },
-              ],
-            }],
-          }),
-        }
-      );
-      const data = await resp.json();
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+              { inlineData: { mimeType: file.type, data: base64 } },
+            ],
+          }],
+        }),
+      }
+    );
+    const data = await resp.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    return JSON.parse(jsonMatch[0]);
+  };
+
+  const scanWithTesseract = async (file) => {
+    const { data: { text } } = await Tesseract.recognize(file, "jpn", {
+      logger: () => {},
+    });
+    // Parse Japanese nutrition label text
+    const num = (pattern) => {
+      const m = text.match(pattern);
+      return m ? parseFloat(m[1]) : 0;
+    };
+    const protein = num(/(?:たんぱく質|タンパク質|蛋白質|protein)[^\d]*?([\d.]+)/i);
+    const fat = num(/(?:脂質|脂肪|fat)[^\d]*?([\d.]+)/i);
+    const fiber = num(/(?:粗繊維|繊維|fiber)[^\d]*?([\d.]+)/i);
+    const ash = num(/(?:灰分|ash)[^\d]*?([\d.]+)/i);
+    const moisture = num(/(?:水分|moisture)[^\d]*?([\d.]+)/i);
+    const kcalMatch = text.match(/([\d.]+)\s*(?:g|ｇ)\s*(?:あたり|当たり|当り|につき)?\s*[^\d]*?([\d.]+)\s*(?:kcal|キロカロリー)/i)
+      || text.match(/([\d.]+)\s*(?:kcal|キロカロリー)\s*[/／]\s*([\d.]+)\s*(?:g|ｇ)/i);
+    let kcalGrams = 0, kcalValue = 0;
+    if (kcalMatch) { kcalGrams = parseFloat(kcalMatch[1]); kcalValue = parseFloat(kcalMatch[2]); }
+    // Also try "XXXkcal/100g" pattern
+    const kcalPer100 = text.match(/([\d.]+)\s*(?:kcal|キロカロリー)\s*[/／]?\s*100\s*(?:g|ｇ)/i);
+    if (kcalPer100 && !kcalMatch) { kcalGrams = 100; kcalValue = parseFloat(kcalPer100[1]); }
+
+    if (!protein && !fat && !fiber && !ash && !moisture && !kcalValue) return null;
+    return { name: "", protein, fat, fiber, ash, moisture, kcalGrams, kcalValue };
+  };
+
+  const scanFoodLabel = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setScanning(true);
+    try {
+      let parsed = null;
+      if (geminiKey) {
+        parsed = await scanWithGemini(file);
+      } else {
+        parsed = await scanWithTesseract(file);
+      }
+      if (parsed) {
         setNewFood((p) => ({
           ...p,
           name: parsed.name || p.name,
@@ -494,7 +530,7 @@ JSONのみ出力してください。` },
           kcalGrams: String(parsed.kcalGrams ?? ""),
           kcalValue: String(parsed.kcalValue ?? ""),
         }));
-        alert("成分表を読み取りました！内容を確認してください。");
+        alert(`成分表を読み取りました！${geminiKey ? "" : "（精度を上げるにはGemini APIキーを設定してください）"}内容を確認してください。`);
       } else {
         alert("成分表を読み取れませんでした。手動で入力してください。");
       }
@@ -895,8 +931,12 @@ JSONのみ出力してください。` },
           {showApiSettings && (
             <div className="bg-gray-50 rounded-xl p-4 space-y-2 border">
               <p className="text-sm font-medium text-gray-700">⚙ 設定</p>
+              <div className="bg-blue-50 rounded-lg p-3 text-xs text-blue-700 space-y-1">
+                <p>📷 成分表の画像読み取りは<strong>登録なし</strong>でも使えます。</p>
+                <p>Gemini APIキーを設定すると、より高精度な読み取りが可能になります。</p>
+              </div>
               <label className="block">
-                <span className="text-xs text-gray-500">Gemini APIキー（成分表の画像読み取りに使用）</span>
+                <span className="text-xs text-gray-500">Gemini APIキー（高精度モード・任意）</span>
                 <div className="flex gap-2 mt-1">
                   <input type="password"
                     className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-400 focus:outline-none"
@@ -908,7 +948,9 @@ JSONのみ出力してください。` },
                   >保存</button>
                 </div>
                 <p className="text-[11px] text-gray-400 mt-1">
-                  Google AI Studio (aistudio.google.com) で無料で取得できます。端末内に保存されます。
+                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
+                    className="text-blue-500 underline hover:text-blue-700">Google AI Studio（https://aistudio.google.com/apikey）</a>
+                  で無料で取得できます。APIキーは端末内にのみ保存されます。
                 </p>
               </label>
             </div>
@@ -999,12 +1041,17 @@ JSONのみ出力してください。` },
                   </label>
 
                   {/* Image scan button */}
-                  <label className={`flex items-center justify-center gap-2 border-2 border-dashed rounded-lg py-3 cursor-pointer transition ${
+                  <label className={`flex flex-col items-center justify-center gap-1 border-2 border-dashed rounded-lg py-3 cursor-pointer transition ${
                     scanning ? "border-amber-400 bg-amber-50" : "border-gray-300 hover:border-amber-400 hover:bg-amber-50"
                   }`}>
-                    <span>{scanning ? "⏳" : "📷"}</span>
-                    <span className="text-sm text-gray-600">
-                      {scanning ? "読み取り中..." : "成分表を撮影して自動入力"}
+                    <div className="flex items-center gap-2">
+                      <span>{scanning ? "⏳" : "📷"}</span>
+                      <span className="text-sm text-gray-600">
+                        {scanning ? "読み取り中..." : "成分表を撮影して自動入力"}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-gray-400">
+                      {geminiKey ? "Gemini AI（高精度）" : "登録不要・そのまま使えます"}
                     </span>
                     <input type="file" accept="image/*" capture="environment" onChange={scanFoodLabel}
                       disabled={scanning} className="hidden" />
