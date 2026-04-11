@@ -123,6 +123,7 @@ export default function CatFoodCalculator() {
   const [savedMenus, setSavedMenus] = useState([]);
   const [showSaveForm, setShowSaveForm] = useState(false);
   const [saveMenuName, setSaveMenuName] = useState("");
+  const [loadedMenuId, setLoadedMenuId] = useState(null); // currently loaded menu ID
 
   /* ─── Dialogs ─── */
   const [showAdd, setShowAdd] = useState(false);
@@ -192,7 +193,20 @@ export default function CatFoodCalculator() {
     setPetName(menu.petName || "");
     setWeight(menu.weight ? String(menu.weight) : "");
     setMenuItems(menu.items || []);
+    setLoadedMenuId(menu.id);
   }, []);
+
+  /* ─── Overwrite a saved menu ─── */
+  const overwriteMenu = useCallback(async () => {
+    if (!loadedMenuId) return;
+    const updated = savedMenus.map((m) =>
+      m.id === loadedMenuId
+        ? { ...m, petName, weight: parseFloat(weight) || 0, items: [...menuItems], savedAt: new Date().toISOString() }
+        : m
+    );
+    setSavedMenus(updated);
+    await store.set("saved-menus", updated);
+  }, [loadedMenuId, savedMenus, petName, weight, menuItems]);
 
   /* ─── Delete a saved menu ─── */
   const deleteSavedMenu = useCallback(async (menuId) => {
@@ -580,9 +594,20 @@ export default function CatFoodCalculator() {
             </div>
           )}
 
+          {/* Overwrite menu button */}
+          {loadedMenuId && (
+            <button
+              onClick={overwriteMenu}
+              className="w-full bg-white border-2 border-blue-400 text-blue-700 hover:bg-blue-50 py-3 rounded-xl font-medium transition flex items-center justify-center gap-2"
+            >
+              <span>📝</span> このメニューを上書きする
+              <span className="text-xs text-blue-400">({savedMenus.find((m) => m.id === loadedMenuId)?.name})</span>
+            </button>
+          )}
+
           {/* New menu button */}
           <button
-            onClick={() => { setPetName(""); setWeight(""); setMenuItems([]); }}
+            onClick={() => { setPetName(""); setWeight(""); setMenuItems([]); setLoadedMenuId(null); }}
             className="w-full bg-white border-2 border-gray-300 text-gray-600 hover:bg-gray-50 py-3 rounded-xl font-medium transition flex items-center justify-center gap-2"
           >
             <span>✨</span> 新しいメニューを作る
