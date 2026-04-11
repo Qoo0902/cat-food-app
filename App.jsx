@@ -407,10 +407,12 @@ export default function CatFoodCalculator() {
       const existingNames = new Set(foodMaster.map((f) => f.name));
       const newItems = [];
 
+      const SKIP_NAMES = /^(合計|DM|糖質|タンパク質|脂質|粗繊維|灰分|水分|[\d.]+%?)$/;
       for (let i = headerIdx + 1; i < lines.length; i++) {
         const cols = lines[i].split(",").map((c) => c.trim());
         const name = cols[nameIdx];
-        if (!name) continue;
+        if (!name || name === "合計") break; // 合計行以降は集計データなので終了
+        if (SKIP_NAMES.test(name)) continue;
         if (existingNames.has(name)) { skipped++; continue; }
 
         newItems.push({
