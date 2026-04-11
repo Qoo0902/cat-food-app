@@ -530,7 +530,7 @@ JSONのみ出力してください。` },
           kcalGrams: String(parsed.kcalGrams ?? ""),
           kcalValue: String(parsed.kcalValue ?? ""),
         }));
-        alert(`成分表を読み取りました！${geminiKey ? "" : "（精度を上げるにはGemini APIキーを設定してください）"}内容を確認してください。`);
+        alert("成分表を読み取りました！内容を確認してください。");
       } else {
         alert("成分表を読み取れませんでした。手動で入力してください。");
       }
