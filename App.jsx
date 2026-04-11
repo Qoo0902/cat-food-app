@@ -63,7 +63,9 @@ const EMPTY_FOOD = {
   fiber: "",
   ash: "",
   moisture: "",
-  kcalPerG: "",
+  kcalGrams: "",
+  kcalValue: "",
+  isComplete: false,
 };
 
 /* ─── CSV export ─── */
@@ -78,7 +80,7 @@ function exportCSV(petName, weight, der, waterNeed, items, totals, dm) {
     [],
     [
       "商品名", "糖質(%)", "タンパク質(%)", "脂質(%)", "粗繊維(%)", "灰分(%)",
-      "水分(%)", "kcal/g", "給餌量(g)", "合計カロリー(kcal)", "水分(ml)",
+      "水分(%)", "kcal/100g", "給餌量(g)", "合計カロリー(kcal)", "水分(ml)", "総合栄養食",
     ],
   ];
 
@@ -87,8 +89,9 @@ function exportCSV(petName, weight, der, waterNeed, items, totals, dm) {
     const carb = calcCarbs(f.protein, f.fat, f.fiber, f.ash, f.moisture);
     rows.push([
       f.name, fmt(carb), fmt(f.protein), fmt(f.fat), fmt(f.fiber), fmt(f.ash),
-      fmt(f.moisture), fmt(f.kcalPerG), fmt(it.amount),
-      fmt(f.kcalPerG * it.amount), fmt((it.amount * f.moisture) / 100),
+      fmt(f.moisture), fmt(f.kcalPer100g), fmt(it.amount),
+      fmt(f.kcalPer100g * it.amount / 100), fmt((it.amount * f.moisture) / 100),
+      f.isComplete ? "○" : "",
     ]);
   });
 
@@ -243,7 +246,7 @@ export default function CatFoodCalculator() {
     const amt = it.amount || 0;
     return {
       ...it, carb,
-      totalKcal: f.kcalPerG * amt,
+      totalKcal: f.kcalPer100g * amt / 100,
       waterMl: (amt * f.moisture) / 100,
       gProtein: (amt * f.protein) / 100,
       gFat: (amt * f.fat) / 100,
@@ -283,6 +286,13 @@ export default function CatFoodCalculator() {
 
   const kcalDiff = totals.kcal - der;
   const waterDiff = totals.water - waterNeed;
+  const kcalPctOfDer = der > 0 ? (totals.kcal / der) * 100 : 0;
+  const kcalDiffPct = der > 0 ? ((totals.kcal - der) / der) * 100 : 0;
+
+  const completeKcal = enriched.filter((e) => e.food.isComplete).reduce((s, e) => s + e.totalKcal, 0);
+  const generalKcal = totals.kcal - completeKcal;
+  const completePct = totals.kcal > 0 ? (completeKcal / totals.kcal) * 100 : 0;
+  const generalPct = totals.kcal > 0 ? (generalKcal / totals.kcal) * 100 : 0;
 
   /* ─── Handlers ─── */
   const addFromMaster = () => {
@@ -305,7 +315,10 @@ export default function CatFoodCalculator() {
       fiber: parseFloat(newFood.fiber) || 0,
       ash: parseFloat(newFood.ash) || 0,
       moisture: parseFloat(newFood.moisture) || 0,
-      kcalPerG: parseFloat(newFood.kcalPerG) || 0,
+      kcalPer100g: (parseFloat(newFood.kcalGrams) > 0 && parseFloat(newFood.kcalValue) >= 0)
+        ? (parseFloat(newFood.kcalValue) / parseFloat(newFood.kcalGrams)) * 100
+        : 0,
+      isComplete: newFood.isComplete,
     };
     if (!f.name) return;
     saveMaster([...foodMaster, f]);
@@ -327,6 +340,60 @@ export default function CatFoodCalculator() {
 
   const removeMasterFood = (id) => {
     saveMaster(foodMaster.filter((f) => f.id !== id));
+  };
+
+  /* ─── CSV Import ─── */
+  const importCSV = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target.result;
+      const lines = text.split(/\r?\n/).filter((l) => l.trim());
+      if (lines.length < 2) { alert("CSVにデータ行がありません"); return; }
+
+      const header = lines[0].split(",").map((h) => h.trim());
+      const nameIdx = header.findIndex((h) => /商品名|name/i.test(h));
+      const proteinIdx = header.findIndex((h) => /タンパク|protein/i.test(h));
+      const fatIdx = header.findIndex((h) => /脂質|fat/i.test(h));
+      const fiberIdx = header.findIndex((h) => /繊維|fiber/i.test(h));
+      const ashIdx = header.findIndex((h) => /灰分|ash/i.test(h));
+      const moistureIdx = header.findIndex((h) => /水分|moisture/i.test(h));
+      const kcalIdx = header.findIndex((h) => /kcal.*100|カロリー/i.test(h));
+      const completeIdx = header.findIndex((h) => /総合栄養食|complete/i.test(h));
+
+      if (nameIdx < 0) { alert("「商品名」列が見つかりません"); return; }
+
+      let imported = 0, skipped = 0;
+      const existingNames = new Set(foodMaster.map((f) => f.name));
+      const newItems = [];
+
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(",").map((c) => c.trim());
+        const name = cols[nameIdx];
+        if (!name) continue;
+        if (existingNames.has(name)) { skipped++; continue; }
+
+        newItems.push({
+          id: uid(),
+          name,
+          protein: parseFloat(cols[proteinIdx]) || 0,
+          fat: parseFloat(cols[fatIdx]) || 0,
+          fiber: parseFloat(cols[fiberIdx]) || 0,
+          ash: parseFloat(cols[ashIdx]) || 0,
+          moisture: parseFloat(cols[moistureIdx]) || 0,
+          kcalPer100g: parseFloat(cols[kcalIdx]) || 0,
+          isComplete: completeIdx >= 0 ? /true|1|○|はい|yes/i.test(cols[completeIdx]) : false,
+        });
+        existingNames.add(name);
+        imported++;
+      }
+
+      if (newItems.length > 0) saveMaster([...foodMaster, ...newItems]);
+      alert(`${imported}件インポート${skipped > 0 ? `、${skipped}件スキップ（重複）` : ""}`);
+    };
+    reader.readAsText(file);
+    e.target.value = "";
   };
 
   /* ─── Status color helpers ─── */
@@ -422,7 +489,7 @@ export default function CatFoodCalculator() {
                     <th className="px-1 py-1.5">繊維%</th>
                     <th className="px-1 py-1.5">灰分%</th>
                     <th className="px-1 py-1.5">水分%</th>
-                    <th className="px-1 py-1.5">kcal/g</th>
+                    <th className="px-1 py-1.5">kcal/100g</th>
                     <th className="px-1 py-1.5">給餌量g</th>
                     <th className="px-1 py-1.5">kcal</th>
                     <th className="px-1 py-1.5">水分ml</th>
@@ -432,14 +499,19 @@ export default function CatFoodCalculator() {
                 <tbody>
                   {enriched.map((e) => (
                     <tr key={e.id} className="border-b border-gray-100 hover:bg-amber-50/40">
-                      <td className="px-2 py-1.5 font-medium max-w-[120px] truncate">{e.food.name}</td>
+                      <td className="px-2 py-1.5 font-medium max-w-[160px]">
+                        <span className="truncate block">{e.food.name}</span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${e.food.isComplete ? "bg-emerald-100 text-emerald-700" : "bg-gray-100 text-gray-500"}`}>
+                          {e.food.isComplete ? "総合" : "一般"}
+                        </span>
+                      </td>
                       <td className="text-center px-1 text-gray-500">{fmt(e.carb)}</td>
                       <td className="text-center px-1">{fmt(e.food.protein)}</td>
                       <td className="text-center px-1">{fmt(e.food.fat)}</td>
                       <td className="text-center px-1">{fmt(e.food.fiber)}</td>
                       <td className="text-center px-1">{fmt(e.food.ash)}</td>
                       <td className="text-center px-1">{fmt(e.food.moisture)}</td>
-                      <td className="text-center px-1">{fmt(e.food.kcalPerG)}</td>
+                      <td className="text-center px-1">{fmt(e.food.kcalPer100g)}</td>
                       <td className="text-center px-1">
                         <input type="number" min="0" step="1"
                           className="w-16 border border-gray-200 rounded px-1.5 py-0.5 text-center focus:ring-1 focus:ring-amber-400 focus:outline-none"
@@ -485,6 +557,9 @@ export default function CatFoodCalculator() {
                 <p className={`text-sm font-semibold ${kcalStatus}`}>
                   {kcalDiff >= 0 ? `+${fmt(kcalDiff)} kcal (超過)` : `${fmt(kcalDiff)} kcal (不足)`}
                 </p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  DER比 {fmt(kcalPctOfDer)}%（{kcalDiffPct >= 0 ? "+" : ""}{fmt(kcalDiffPct)}%）
+                </p>
                 <div className="w-full bg-gray-200 rounded-full h-2 mt-1">
                   <div className={`h-2 rounded-full transition-all ${
                     Math.abs(kcalDiff) <= der * 0.05 ? "bg-emerald-500" : kcalDiff < 0 ? "bg-amber-400" : "bg-red-400"
@@ -503,6 +578,21 @@ export default function CatFoodCalculator() {
                 </div>
               </div>
             </div>
+
+            {/* ── Food type calorie ratio ── */}
+            {totals.kcal > 0 && (
+              <div className="rounded-lg border p-3 space-y-2">
+                <p className="text-xs text-gray-500">カロリー内訳（総合栄養食 / 一般食）</p>
+                <div className="flex gap-3 text-sm">
+                  <span className="text-emerald-700 font-semibold">総合: {fmt(completeKcal)} kcal ({fmt(completePct)}%)</span>
+                  <span className="text-orange-600 font-semibold">一般: {fmt(generalKcal)} kcal ({fmt(generalPct)}%)</span>
+                </div>
+                <div className="w-full bg-gray-200 rounded-full h-3 flex overflow-hidden">
+                  <div className="bg-emerald-500 h-3 transition-all" style={{ width: `${completePct}%` }} />
+                  <div className="bg-orange-400 h-3 transition-all" style={{ width: `${generalPct}%` }} />
+                </div>
+              </div>
+            )}
           </section>
         )}
 
@@ -619,10 +709,16 @@ export default function CatFoodCalculator() {
               onClick={() => setShowResetConfirm(true)}
               className="text-sm text-red-400 hover:text-red-600 px-3 py-1.5 transition"
             >🗑 データリセット</button>
-            <button
-              onClick={() => exportCSV(petName, weight, der, waterNeed, menuItems, totals, dm)}
-              className="text-sm border border-gray-300 hover:bg-gray-100 px-4 py-1.5 rounded-lg transition"
-            >CSV エクスポート</button>
+            <div className="flex gap-2">
+              <label className="text-sm border border-gray-300 hover:bg-gray-100 px-4 py-1.5 rounded-lg transition cursor-pointer">
+                CSV インポート
+                <input type="file" accept=".csv" onChange={importCSV} className="hidden" />
+              </label>
+              <button
+                onClick={() => exportCSV(petName, weight, der, waterNeed, menuItems, totals, dm)}
+                className="text-sm border border-gray-300 hover:bg-gray-100 px-4 py-1.5 rounded-lg transition"
+              >CSV エクスポート</button>
+            </div>
           </div>
         </div>
       </main>
@@ -661,7 +757,7 @@ export default function CatFoodCalculator() {
                         value={selectedMasterId} onChange={(e) => setSelectedMasterId(e.target.value)}>
                         <option value="">商品を選んでください</option>
                         {foodMaster.map((f) => (
-                          <option key={f.id} value={f.id}>{f.name} ({f.kcalPerG} kcal/g)</option>
+                          <option key={f.id} value={f.id}>{f.name} ({f.kcalPer100g} kcal/100g)</option>
                         ))}
                       </select>
 
@@ -701,6 +797,13 @@ export default function CatFoodCalculator() {
                       placeholder="例: ヒルズ I/D 消化ケア"
                       value={newFood.name} onChange={(e) => setNewFood((p) => ({ ...p, name: e.target.value }))} />
                   </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={newFood.isComplete}
+                      onChange={(e) => setNewFood((p) => ({ ...p, isComplete: e.target.checked }))}
+                      className="w-4 h-4 accent-amber-600 rounded" />
+                    <span className="text-sm text-gray-700">総合栄養食</span>
+                    <span className="text-[11px] text-gray-400">（チェックなし＝一般食・おやつ）</span>
+                  </label>
                   <p className="text-xs text-gray-500 font-medium">成分 (すべて%)</p>
                   <div className="grid grid-cols-2 gap-2">
                     {[
@@ -717,12 +820,24 @@ export default function CatFoodCalculator() {
                           value={newFood[key]} onChange={(e) => setNewFood((p) => ({ ...p, [key]: e.target.value }))} />
                       </label>
                     ))}
-                    <label className="block">
-                      <span className="text-[11px] text-gray-400">kcal/g</span>
-                      <input type="number" step="0.01" min="0"
-                        className="mt-0.5 w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-amber-400 focus:outline-none"
-                        value={newFood.kcalPerG} onChange={(e) => setNewFood((p) => ({ ...p, kcalPerG: e.target.value }))} />
-                    </label>
+                    <div className="col-span-2">
+                      <p className="text-[11px] text-gray-400 mb-1">カロリー（何gで何kcal？）</p>
+                      <div className="flex items-center gap-1.5">
+                        <input type="number" step="1" min="0" placeholder="70"
+                          className="w-20 border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:ring-2 focus:ring-amber-400 focus:outline-none"
+                          value={newFood.kcalGrams} onChange={(e) => setNewFood((p) => ({ ...p, kcalGrams: e.target.value }))} />
+                        <span className="text-xs text-gray-500">g で</span>
+                        <input type="number" step="0.1" min="0" placeholder="50"
+                          className="w-20 border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:ring-2 focus:ring-amber-400 focus:outline-none"
+                          value={newFood.kcalValue} onChange={(e) => setNewFood((p) => ({ ...p, kcalValue: e.target.value }))} />
+                        <span className="text-xs text-gray-500">kcal</span>
+                      </div>
+                      {parseFloat(newFood.kcalGrams) > 0 && parseFloat(newFood.kcalValue) >= 0 && (
+                        <p className="text-[11px] text-gray-400 mt-0.5">
+                          → {fmt((parseFloat(newFood.kcalValue) / parseFloat(newFood.kcalGrams)) * 100)} kcal/100g
+                        </p>
+                      )}
+                    </div>
                   </div>
                   {newFood.protein && (
                     <p className="text-xs text-gray-500">
