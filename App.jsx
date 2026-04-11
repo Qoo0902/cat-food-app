@@ -139,6 +139,11 @@ export default function CatFoodCalculator() {
   const [editFood, setEditFood] = useState({ ...EMPTY_FOOD });
   const [loaded, setLoaded] = useState(false);
 
+  /* ─── Gemini API ─── */
+  const [geminiKey, setGeminiKey] = useState("");
+  const [showApiSettings, setShowApiSettings] = useState(false);
+  const [scanning, setScanning] = useState(false);
+
   /* ─── Load ─── */
   useEffect(() => {
     (async () => {
@@ -156,6 +161,9 @@ export default function CatFoodCalculator() {
 
       const saved = await store.get("saved-menus");
       if (saved) setSavedMenus(saved);
+
+      const apiKey = await store.get("gemini-api-key");
+      if (apiKey) setGeminiKey(apiKey);
 
       setLoaded(true);
     })();
@@ -422,6 +430,80 @@ export default function CatFoodCalculator() {
     };
     reader.readAsText(file);
     e.target.value = "";
+  };
+
+  /* ─── Save Gemini API key ─── */
+  const saveApiKey = useCallback(async (key) => {
+    setGeminiKey(key);
+    await store.set("gemini-api-key", key);
+  }, []);
+
+  /* ─── Scan food label image ─── */
+  const scanFoodLabel = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!geminiKey) { alert("Gemini APIキーを設定してください（ページ下部の⚙設定）"); return; }
+    setScanning(true);
+    try {
+      const base64 = await new Promise((resolve) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result.split(",")[1]);
+        r.readAsDataURL(file);
+      });
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: `この画像はキャットフードの成分表です。以下のJSON形式で数値を抽出してください。
+数値が見つからない項目は0にしてください。商品名も読み取れれば入れてください。
+カロリーは「○○gあたり○○kcal」の形で読み取り、kcalGramsとkcalValueに入れてください。
+{
+  "name": "商品名",
+  "protein": タンパク質の数値,
+  "fat": 脂質の数値,
+  "fiber": 粗繊維の数値,
+  "ash": 灰分の数値,
+  "moisture": 水分の数値,
+  "kcalGrams": カロリー表記の何gの部分,
+  "kcalValue": カロリー表記の何kcalの部分
+}
+JSONのみ出力してください。` },
+                { inlineData: { mimeType: file.type, data: base64 } },
+              ],
+            }],
+          }),
+        }
+      );
+      const data = await resp.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        setNewFood((p) => ({
+          ...p,
+          name: parsed.name || p.name,
+          protein: String(parsed.protein ?? ""),
+          fat: String(parsed.fat ?? ""),
+          fiber: String(parsed.fiber ?? ""),
+          ash: String(parsed.ash ?? ""),
+          moisture: String(parsed.moisture ?? ""),
+          kcalGrams: String(parsed.kcalGrams ?? ""),
+          kcalValue: String(parsed.kcalValue ?? ""),
+        }));
+        alert("成分表を読み取りました！内容を確認してください。");
+      } else {
+        alert("成分表を読み取れませんでした。手動で入力してください。");
+      }
+    } catch (err) {
+      alert("エラー: " + (err.message || "画像の解析に失敗しました"));
+    } finally {
+      setScanning(false);
+      e.target.value = "";
+    }
   };
 
   /* ─── Status color helpers ─── */
@@ -785,12 +867,18 @@ export default function CatFoodCalculator() {
             <span>✨</span> 新しいメニューを作る
           </button>
 
-          {/* Export & Reset row */}
+          {/* Export & Reset & Settings row */}
           <div className="flex justify-between items-center">
-            <button
-              onClick={() => setShowResetConfirm(true)}
-              className="text-sm text-red-400 hover:text-red-600 px-3 py-1.5 transition"
-            >🗑 データリセット</button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowResetConfirm(true)}
+                className="text-sm text-red-400 hover:text-red-600 px-3 py-1.5 transition"
+              >🗑 リセット</button>
+              <button
+                onClick={() => setShowApiSettings(!showApiSettings)}
+                className="text-sm text-gray-400 hover:text-gray-600 px-2 py-1.5 transition"
+              >⚙ 設定</button>
+            </div>
             <div className="flex gap-2">
               <label className="text-sm border border-gray-300 hover:bg-gray-100 px-4 py-1.5 rounded-lg transition cursor-pointer">
                 CSV インポート
@@ -802,6 +890,29 @@ export default function CatFoodCalculator() {
               >CSV エクスポート</button>
             </div>
           </div>
+
+          {/* API Settings */}
+          {showApiSettings && (
+            <div className="bg-gray-50 rounded-xl p-4 space-y-2 border">
+              <p className="text-sm font-medium text-gray-700">⚙ 設定</p>
+              <label className="block">
+                <span className="text-xs text-gray-500">Gemini APIキー（成分表の画像読み取りに使用）</span>
+                <div className="flex gap-2 mt-1">
+                  <input type="password"
+                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-400 focus:outline-none"
+                    placeholder="AIza..."
+                    value={geminiKey}
+                    onChange={(e) => setGeminiKey(e.target.value)} />
+                  <button onClick={() => { saveApiKey(geminiKey); alert("保存しました"); }}
+                    className="bg-amber-600 hover:bg-amber-700 text-white text-sm px-4 py-2 rounded-lg transition"
+                  >保存</button>
+                </div>
+                <p className="text-[11px] text-gray-400 mt-1">
+                  Google AI Studio (aistudio.google.com) で無料で取得できます。端末内に保存されます。
+                </p>
+              </label>
+            </div>
+          )}
         </div>
       </main>
 
@@ -886,6 +997,19 @@ export default function CatFoodCalculator() {
                     <span className="text-sm text-gray-700">総合栄養食</span>
                     <span className="text-[11px] text-gray-400">（チェックなし＝一般食・おやつ）</span>
                   </label>
+
+                  {/* Image scan button */}
+                  <label className={`flex items-center justify-center gap-2 border-2 border-dashed rounded-lg py-3 cursor-pointer transition ${
+                    scanning ? "border-amber-400 bg-amber-50" : "border-gray-300 hover:border-amber-400 hover:bg-amber-50"
+                  }`}>
+                    <span>{scanning ? "⏳" : "📷"}</span>
+                    <span className="text-sm text-gray-600">
+                      {scanning ? "読み取り中..." : "成分表を撮影して自動入力"}
+                    </span>
+                    <input type="file" accept="image/*" capture="environment" onChange={scanFoodLabel}
+                      disabled={scanning} className="hidden" />
+                  </label>
+
                   <p className="text-xs text-gray-500 font-medium">成分 (すべて%)</p>
                   <div className="grid grid-cols-2 gap-2">
                     {[
@@ -991,16 +1115,15 @@ export default function CatFoodCalculator() {
                             </div>
                           </div>
                         ) : (
-                          <div className="flex items-center justify-between">
-                            <div className="truncate">
+                          <div className="flex items-center gap-2">
+                            <button onClick={() => startEditFood(f)}
+                              className="bg-amber-100 hover:bg-amber-200 text-amber-700 text-[11px] px-2 py-1 rounded transition shrink-0">編集</button>
+                            <div className="truncate flex-1">
                               <span>{f.name}</span>
                               <span className="text-xs text-gray-400 ml-1">({fmt(f.kcalPer100g)} kcal/100g)</span>
                               {f.isComplete && <span className="text-[10px] ml-1 px-1 py-0.5 bg-emerald-100 text-emerald-700 rounded-full">総合</span>}
                             </div>
-                            <div className="flex gap-1 ml-2 shrink-0">
-                              <button onClick={() => startEditFood(f)} className="text-amber-500 hover:text-amber-700 text-xs px-1">編集</button>
-                              <button onClick={() => removeMasterFood(f.id)} className="text-red-400 hover:text-red-600 text-xs px-1">削除</button>
-                            </div>
+                            <button onClick={() => removeMasterFood(f.id)} className="text-red-400 hover:text-red-600 text-xs px-1 shrink-0">削除</button>
                           </div>
                         )}
                       </li>
