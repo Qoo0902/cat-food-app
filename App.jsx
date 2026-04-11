@@ -66,9 +66,6 @@ const EMPTY_FOOD = {
   kcalPerG: "",
 };
 
-/* ─── Default menu ─── */
-const DEFAULT_MENU = { id: "", name: "デフォルト", petName: "", weight: "", items: [] };
-
 /* ─── CSV export ─── */
 function exportCSV(petName, weight, der, waterNeed, items, totals, dm) {
   const rows = [
@@ -116,25 +113,24 @@ function exportCSV(petName, weight, der, waterNeed, items, totals, dm) {
    Main Component
    ═══════════════════════════════════════════ */
 export default function CatFoodCalculator() {
-  /* ─── Menu management state ─── */
-  const [menus, setMenus] = useState([]);
-  const [activeMenuId, setActiveMenuId] = useState("");
-  const [showMenuPanel, setShowMenuPanel] = useState(false);
-  const [newMenuName, setNewMenuName] = useState("");
-  const [showResetConfirm, setShowResetConfirm] = useState(false);
-
-  /* ─── Current menu state ─── */
+  /* ─── Current editing state ─── */
   const [petName, setPetName] = useState("");
   const [weight, setWeight] = useState("");
   const [foodMaster, setFoodMaster] = useState([]);
   const [menuItems, setMenuItems] = useState([]);
 
-  /* ─── Add dialog state ─── */
+  /* ─── Saved menus ─── */
+  const [savedMenus, setSavedMenus] = useState([]);
+  const [showSaveForm, setShowSaveForm] = useState(false);
+  const [saveMenuName, setSaveMenuName] = useState("");
+
+  /* ─── Dialogs ─── */
   const [showAdd, setShowAdd] = useState(false);
   const [addMode, setAddMode] = useState("select");
   const [selectedMasterId, setSelectedMasterId] = useState("");
   const [addAmount, setAddAmount] = useState("");
   const [newFood, setNewFood] = useState({ ...EMPTY_FOOD });
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   /* ─── Load ─── */
@@ -143,57 +139,29 @@ export default function CatFoodCalculator() {
       const master = await store.get("food-master");
       if (master) setFoodMaster(master);
 
-      const savedMenus = await store.get("menus-list");
-      if (savedMenus && savedMenus.length > 0) {
-        setMenus(savedMenus);
-        const lastActiveId = await store.get("active-menu-id");
-        const targetId = lastActiveId && savedMenus.find((m) => m.id === lastActiveId)
-          ? lastActiveId
-          : savedMenus[0].id;
-        setActiveMenuId(targetId);
-        const menuData = await store.get(`menu-${targetId}`);
-        if (menuData) {
-          setPetName(menuData.petName || "");
-          setWeight(menuData.weight || "");
-          setMenuItems(menuData.items || []);
-        }
-      } else {
-        // Migrate from old format or create default
-        const oldMenu = await store.get("current-menu");
-        const defaultId = uid();
-        const defaultMenu = { id: defaultId, name: "デフォルト" };
-        setMenus([defaultMenu]);
-        setActiveMenuId(defaultId);
-        if (oldMenu) {
-          setPetName(oldMenu.petName || "");
-          setWeight(oldMenu.weight || "");
-          setMenuItems(oldMenu.items || []);
-        }
-        await store.set("menus-list", [defaultMenu]);
-        if (oldMenu) {
-          await store.set(`menu-${defaultId}`, oldMenu);
-        }
+      const current = await store.get("current-menu");
+      if (current) {
+        setPetName(current.petName || "");
+        setWeight(current.weight || "");
+        setMenuItems(current.items || []);
       }
+
+      const saved = await store.get("saved-menus");
+      if (saved) setSavedMenus(saved);
+
       setLoaded(true);
     })();
   }, []);
 
-  /* ─── Save current menu data ─── */
+  /* ─── Auto-save current editing state ─── */
   useEffect(() => {
-    if (!loaded || !activeMenuId) return;
-    store.set(`menu-${activeMenuId}`, {
+    if (!loaded) return;
+    store.set("current-menu", {
       petName,
       weight: parseFloat(weight) || 0,
       items: menuItems,
     });
-    store.set("active-menu-id", activeMenuId);
-  }, [petName, weight, menuItems, loaded, activeMenuId]);
-
-  /* ─── Save menus list ─── */
-  useEffect(() => {
-    if (!loaded) return;
-    store.set("menus-list", menus);
-  }, [menus, loaded]);
+  }, [petName, weight, menuItems, loaded]);
 
   /* ─── Save master ─── */
   const saveMaster = useCallback(async (m) => {
@@ -201,91 +169,59 @@ export default function CatFoodCalculator() {
     await store.set("food-master", m);
   }, []);
 
-  /* ─── Switch menu ─── */
-  const switchMenu = useCallback(async (menuId) => {
-    if (menuId === activeMenuId) return;
-    // Save current first
-    await store.set(`menu-${activeMenuId}`, {
+  /* ─── Save current menu with a name ─── */
+  const saveCurrentMenu = useCallback(async () => {
+    if (!saveMenuName.trim()) return;
+    const newSaved = {
+      id: uid(),
+      name: saveMenuName.trim(),
       petName,
       weight: parseFloat(weight) || 0,
-      items: menuItems,
-    });
-    // Load new
-    const menuData = await store.get(`menu-${menuId}`);
-    setActiveMenuId(menuId);
-    setPetName(menuData?.petName || "");
-    setWeight(menuData?.weight || "");
-    setMenuItems(menuData?.items || []);
-    setShowMenuPanel(false);
-  }, [activeMenuId, petName, weight, menuItems]);
+      items: [...menuItems],
+      savedAt: new Date().toISOString(),
+    };
+    const updated = [...savedMenus, newSaved];
+    setSavedMenus(updated);
+    await store.set("saved-menus", updated);
+    setSaveMenuName("");
+    setShowSaveForm(false);
+  }, [saveMenuName, petName, weight, menuItems, savedMenus]);
 
-  /* ─── Add new menu ─── */
-  const addMenu = useCallback(async () => {
-    if (!newMenuName.trim()) return;
-    const newId = uid();
-    const newMenu = { id: newId, name: newMenuName.trim() };
-    const updated = [...menus, newMenu];
-    setMenus(updated);
-    await store.set("menus-list", updated);
-    await store.set(`menu-${newId}`, { petName: "", weight: 0, items: [] });
-    setNewMenuName("");
-    // Switch to new menu
-    await store.set(`menu-${activeMenuId}`, {
-      petName,
-      weight: parseFloat(weight) || 0,
-      items: menuItems,
-    });
-    setActiveMenuId(newId);
-    setPetName("");
-    setWeight("");
-    setMenuItems([]);
-    setShowMenuPanel(false);
-  }, [newMenuName, menus, activeMenuId, petName, weight, menuItems]);
+  /* ─── Load a saved menu ─── */
+  const loadMenu = useCallback((menu) => {
+    setPetName(menu.petName || "");
+    setWeight(menu.weight ? String(menu.weight) : "");
+    setMenuItems(menu.items || []);
+  }, []);
 
-  /* ─── Delete menu ─── */
-  const deleteMenu = useCallback(async (menuId) => {
-    if (menus.length <= 1) return; // Keep at least one
-    const updated = menus.filter((m) => m.id !== menuId);
-    setMenus(updated);
-    await store.remove(`menu-${menuId}`);
-    if (menuId === activeMenuId) {
-      const next = updated[0];
-      const menuData = await store.get(`menu-${next.id}`);
-      setActiveMenuId(next.id);
-      setPetName(menuData?.petName || "");
-      setWeight(menuData?.weight || "");
-      setMenuItems(menuData?.items || []);
-    }
-  }, [menus, activeMenuId]);
+  /* ─── Delete a saved menu ─── */
+  const deleteSavedMenu = useCallback(async (menuId) => {
+    const updated = savedMenus.filter((m) => m.id !== menuId);
+    setSavedMenus(updated);
+    await store.set("saved-menus", updated);
+  }, [savedMenus]);
 
   /* ─── Reset all data ─── */
   const resetAllData = useCallback(async () => {
-    // Clear all menu data
-    for (const m of menus) {
-      await store.remove(`menu-${m.id}`);
-    }
+    await store.remove("current-menu");
+    await store.remove("food-master");
+    await store.remove("saved-menus");
+    // Also clean up old format keys
     await store.remove("menus-list");
     await store.remove("active-menu-id");
-    await store.remove("food-master");
-    await store.remove("current-menu");
 
-    // Reset to default
-    const defaultId = uid();
-    const defaultMenu = { id: defaultId, name: "デフォルト" };
-    setMenus([defaultMenu]);
-    setActiveMenuId(defaultId);
     setPetName("");
     setWeight("");
     setMenuItems([]);
     setFoodMaster([]);
+    setSavedMenus([]);
     setShowResetConfirm(false);
-  }, [menus]);
+  }, []);
 
   /* ─── Derived ─── */
   const w = parseFloat(weight) || 0;
   const der = calcDER(w);
   const waterNeed = der;
-  const activeMenuName = menus.find((m) => m.id === activeMenuId)?.name || "";
 
   const enriched = menuItems.map((it) => {
     const f = it.food;
@@ -396,23 +332,11 @@ export default function CatFoodCalculator() {
     <div className="min-h-screen bg-amber-50/60 text-gray-800 font-sans">
       {/* Header */}
       <header className="bg-gradient-to-r from-amber-600 to-orange-500 text-white px-4 py-3 shadow-md">
-        <div className="max-w-4xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <span className="text-3xl">🐱</span>
-            <div>
-              <h1 className="text-lg font-bold leading-tight">くぅのキャットフード研究室</h1>
-              <p className="text-amber-100 text-xs">猫の食事管理アプリ</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowMenuPanel(true)}
-              className="bg-white/20 hover:bg-white/30 text-white text-sm px-3 py-1.5 rounded-lg transition flex items-center gap-1.5"
-            >
-              <span>📋</span>
-              <span className="max-w-[100px] truncate">{activeMenuName}</span>
-              <span className="text-xs opacity-70">▼</span>
-            </button>
+        <div className="max-w-4xl mx-auto flex items-center gap-3">
+          <span className="text-3xl">🐱</span>
+          <div>
+            <h1 className="text-lg font-bold leading-tight">くぅのキャットフード研究室</h1>
+            <p className="text-amber-100 text-xs">猫の食事管理アプリ</p>
           </div>
         </div>
       </header>
@@ -589,72 +513,86 @@ export default function CatFoodCalculator() {
           </section>
         )}
 
-        {/* ── Export & Reset ── */}
-        <div className="flex justify-between items-center pb-6">
-          <button
-            onClick={() => setShowResetConfirm(true)}
-            className="text-sm text-red-400 hover:text-red-600 px-3 py-1.5 transition"
-          >🗑 データリセット</button>
-          <button
-            onClick={() => exportCSV(petName, weight, der, waterNeed, menuItems, totals, dm)}
-            className="text-sm border border-gray-300 hover:bg-gray-100 px-4 py-1.5 rounded-lg transition"
-          >CSV エクスポート</button>
-        </div>
-      </main>
+        {/* ── Saved Menus ── */}
+        {savedMenus.length > 0 && (
+          <section className="bg-white rounded-xl shadow p-4 space-y-3">
+            <h2 className="font-bold text-amber-700 flex items-center gap-1.5">
+              <span>📋</span> 保存済みメニュー
+            </h2>
+            <ul className="space-y-2">
+              {savedMenus.map((m) => (
+                <li key={m.id} className="flex items-center justify-between bg-gray-50 rounded-lg px-4 py-3">
+                  <div>
+                    <p className="font-medium">{m.name}</p>
+                    <p className="text-xs text-gray-400">
+                      {m.petName || "未設定"} / {m.items?.length || 0}商品
+                      {m.savedAt && ` / ${new Date(m.savedAt).toLocaleDateString("ja-JP")}`}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => loadMenu(m)}
+                      className="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1.5 rounded-lg transition"
+                    >読み込む</button>
+                    <button
+                      onClick={() => deleteSavedMenu(m.id)}
+                      className="text-red-400 hover:text-red-600 text-xs px-2 py-1.5"
+                    >削除</button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
 
-      {/* ═══════════════════════════════════════════
-         Menu Panel (slide-over)
-         ═══════════════════════════════════════════ */}
-      {showMenuPanel && (
-        <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-4"
-          onClick={(e) => e.target === e.currentTarget && setShowMenuPanel(false)}>
-          <div className="bg-white rounded-2xl w-full max-w-md max-h-[85vh] overflow-y-auto shadow-xl">
-            <div className="p-5 space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="font-bold text-lg text-amber-700">📋 メニュー切り替え</h3>
-                <button onClick={() => setShowMenuPanel(false)} className="text-gray-400 hover:text-gray-600 text-xl">×</button>
-              </div>
-
-              <ul className="space-y-2">
-                {menus.map((m) => (
-                  <li key={m.id}
-                    className={`flex items-center justify-between rounded-lg px-4 py-3 cursor-pointer transition ${
-                      m.id === activeMenuId ? "bg-amber-100 border-2 border-amber-400" : "bg-gray-50 hover:bg-gray-100 border-2 border-transparent"
-                    }`}
-                    onClick={() => switchMenu(m.id)}
-                  >
-                    <div className="flex items-center gap-2">
-                      {m.id === activeMenuId && <span className="text-amber-600">✓</span>}
-                      <span className="font-medium">{m.name}</span>
-                    </div>
-                    {menus.length > 1 && (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); deleteMenu(m.id); }}
-                        className="text-red-400 hover:text-red-600 text-sm px-2"
-                      >削除</button>
-                    )}
-                  </li>
-                ))}
-              </ul>
-
-              <div className="flex gap-2 pt-2">
+        {/* ── Save / Export / Reset ── */}
+        <div className="space-y-3 pb-6">
+          {/* Save menu button / form */}
+          {!showSaveForm ? (
+            <button
+              onClick={() => setShowSaveForm(true)}
+              className="w-full bg-white border-2 border-amber-400 text-amber-700 hover:bg-amber-50 py-3 rounded-xl font-medium transition flex items-center justify-center gap-2"
+            >
+              <span>💾</span> このメニューを登録する
+            </button>
+          ) : (
+            <div className="bg-white border-2 border-amber-400 rounded-xl p-4 space-y-3">
+              <p className="font-medium text-amber-700 text-sm">メニュー名を入力してください</p>
+              <div className="flex gap-2">
                 <input
-                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-400 focus:outline-none"
-                  placeholder="新しいメニュー名（例: 療法食メニュー）"
-                  value={newMenuName}
-                  onChange={(e) => setNewMenuName(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && addMenu()}
+                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-400 focus:outline-none"
+                  placeholder="例: 療法食メニュー"
+                  value={saveMenuName}
+                  onChange={(e) => setSaveMenuName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && saveCurrentMenu()}
+                  autoFocus
                 />
                 <button
-                  onClick={addMenu}
-                  disabled={!newMenuName.trim()}
-                  className="bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 text-white text-sm px-4 py-2 rounded-lg font-medium transition"
-                >追加</button>
+                  onClick={saveCurrentMenu}
+                  disabled={!saveMenuName.trim()}
+                  className="bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 text-white px-4 py-2 rounded-lg font-medium transition"
+                >保存</button>
+                <button
+                  onClick={() => { setShowSaveForm(false); setSaveMenuName(""); }}
+                  className="text-gray-400 hover:text-gray-600 px-2"
+                >×</button>
               </div>
             </div>
+          )}
+
+          {/* Export & Reset row */}
+          <div className="flex justify-between items-center">
+            <button
+              onClick={() => setShowResetConfirm(true)}
+              className="text-sm text-red-400 hover:text-red-600 px-3 py-1.5 transition"
+            >🗑 データリセット</button>
+            <button
+              onClick={() => exportCSV(petName, weight, der, waterNeed, menuItems, totals, dm)}
+              className="text-sm border border-gray-300 hover:bg-gray-100 px-4 py-1.5 rounded-lg transition"
+            >CSV エクスポート</button>
           </div>
         </div>
-      )}
+      </main>
 
       {/* ═══════════════════════════════════════════
          Add Food Dialog
