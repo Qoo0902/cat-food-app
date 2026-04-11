@@ -474,7 +474,12 @@ JSONのみ出力してください。` },
         }),
       }
     );
+    if (!resp.ok) {
+      const errBody = await resp.text();
+      throw new Error(`Gemini API エラー (${resp.status}): ${errBody.slice(0, 200)}`);
+    }
     const data = await resp.json();
+    if (data?.error) throw new Error(`Gemini API: ${data.error.message || JSON.stringify(data.error)}`);
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
