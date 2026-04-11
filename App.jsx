@@ -356,18 +356,17 @@ export default function CatFoodCalculator() {
   };
 
   const saveEditFood = () => {
-    const updated = foodMaster.map((f) =>
-      f.id === editingFoodId ? {
-        ...f, name: editFood.name,
-        protein: parseFloat(editFood.protein) || 0, fat: parseFloat(editFood.fat) || 0,
-        fiber: parseFloat(editFood.fiber) || 0, ash: parseFloat(editFood.ash) || 0,
-        moisture: parseFloat(editFood.moisture) || 0, isComplete: editFood.isComplete,
-        kcalPer100g: (parseFloat(editFood.kcalGrams) > 0 && parseFloat(editFood.kcalValue) >= 0)
-          ? (parseFloat(editFood.kcalValue) / parseFloat(editFood.kcalGrams)) * 100
-          : editFood.kcalPer100g,
-      } : f
-    );
-    saveMaster(updated);
+    const newData = {
+      name: editFood.name,
+      protein: parseFloat(editFood.protein) || 0, fat: parseFloat(editFood.fat) || 0,
+      fiber: parseFloat(editFood.fiber) || 0, ash: parseFloat(editFood.ash) || 0,
+      moisture: parseFloat(editFood.moisture) || 0, isComplete: editFood.isComplete,
+      kcalPer100g: (parseFloat(editFood.kcalGrams) > 0 && parseFloat(editFood.kcalValue) >= 0)
+        ? (parseFloat(editFood.kcalValue) / parseFloat(editFood.kcalGrams)) * 100
+        : editFood.kcalPer100g,
+    };
+    saveMaster(foodMaster.map((f) => f.id === editingFoodId ? { ...f, ...newData } : f));
+    setMenuItems((prev) => prev.map((it) => it.food.id === editingFoodId ? { ...it, food: { ...it.food, ...newData } } : it));
     setEditingFoodId(null);
   };
 
@@ -529,7 +528,11 @@ export default function CatFoodCalculator() {
                   {enriched.map((e) => (
                     <tr key={e.id} className="border-b border-gray-100 hover:bg-amber-50/40">
                       <td className="px-2 py-1.5 font-medium max-w-[160px]">
-                        <span className="truncate block">{e.food.name}</span>
+                        <div className="flex items-center gap-1">
+                          <span className="truncate">{e.food.name}</span>
+                          <button onClick={() => startEditFood(e.food)}
+                            className="text-amber-400 hover:text-amber-600 text-[11px] shrink-0" title="編集">&#9998;</button>
+                        </div>
                         <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${e.food.isComplete ? "bg-emerald-100 text-emerald-700" : "bg-gray-100 text-gray-500"}`}>
                           {e.food.isComplete ? "総合" : "一般"}
                         </span>
@@ -571,6 +574,56 @@ export default function CatFoodCalculator() {
                   </tr>
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {/* Inline edit form for food in menu */}
+          {editingFoodId && menuItems.some((it) => it.food.id === editingFoodId) && (
+            <div className="bg-amber-50 border border-amber-300 rounded-lg p-3 space-y-2">
+              <p className="text-xs font-bold text-amber-700">商品を編集中</p>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block col-span-2">
+                  <span className="text-[11px] text-gray-500">商品名</span>
+                  <input className="w-full border border-gray-300 rounded px-2 py-1 text-sm focus:ring-1 focus:ring-amber-400 focus:outline-none"
+                    value={editFood.name} onChange={(e) => setEditFood((p) => ({ ...p, name: e.target.value }))} />
+                </label>
+                <label className="flex items-center gap-2 col-span-2 cursor-pointer">
+                  <input type="checkbox" checked={editFood.isComplete}
+                    onChange={(e) => setEditFood((p) => ({ ...p, isComplete: e.target.checked }))}
+                    className="w-3.5 h-3.5 accent-amber-600" />
+                  <span className="text-xs text-gray-600">総合栄養食</span>
+                </label>
+                {[
+                  { key: "protein", label: "タンパク%" }, { key: "fat", label: "脂質%" },
+                  { key: "fiber", label: "繊維%" }, { key: "ash", label: "灰分%" },
+                  { key: "moisture", label: "水分%" },
+                ].map(({ key, label }) => (
+                  <label key={key} className="block">
+                    <span className="text-[11px] text-gray-400">{label}</span>
+                    <input type="number" step="0.1" min="0" max="100"
+                      className="w-full border border-gray-300 rounded px-2 py-1 text-xs focus:ring-1 focus:ring-amber-400 focus:outline-none"
+                      value={editFood[key]} onChange={(e) => setEditFood((p) => ({ ...p, [key]: e.target.value }))} />
+                  </label>
+                ))}
+              </div>
+              <div className="flex items-center gap-1 text-xs text-gray-500">
+                <span>現在: {fmt(editFood.kcalPer100g)} kcal/100g</span>
+                <span className="mx-1">→</span>
+                <input type="number" step="1" min="0" placeholder="g"
+                  className="w-14 border border-gray-300 rounded px-1 py-0.5 text-xs focus:ring-1 focus:ring-amber-400 focus:outline-none"
+                  value={editFood.kcalGrams} onChange={(e) => setEditFood((p) => ({ ...p, kcalGrams: e.target.value }))} />
+                <span>gで</span>
+                <input type="number" step="0.1" min="0" placeholder="kcal"
+                  className="w-14 border border-gray-300 rounded px-1 py-0.5 text-xs focus:ring-1 focus:ring-amber-400 focus:outline-none"
+                  value={editFood.kcalValue} onChange={(e) => setEditFood((p) => ({ ...p, kcalValue: e.target.value }))} />
+                <span>kcal</span>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={saveEditFood}
+                  className="flex-1 bg-amber-600 hover:bg-amber-700 text-white text-xs py-1.5 rounded transition">保存</button>
+                <button onClick={() => setEditingFoodId(null)}
+                  className="flex-1 border border-gray-300 text-xs py-1.5 rounded hover:bg-gray-100 transition">キャンセル</button>
+              </div>
             </div>
           )}
         </section>
