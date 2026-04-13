@@ -140,6 +140,9 @@ export default function CatFoodCalculator() {
   const [editFood, setEditFood] = useState({ ...EMPTY_FOOD });
   const [loaded, setLoaded] = useState(false);
 
+  /* ─── Goal mode (diet / gain) ─── */
+  const [goalMode, setGoalMode] = useState(null);
+
   /* ─── Gemini API ─── */
   const [geminiKey, setGeminiKey] = useState("");
   const [showApiSettings, setShowApiSettings] = useState(false);
@@ -227,6 +230,16 @@ export default function CatFoodCalculator() {
   /* ─── Delete a saved menu ─── */
   const deleteSavedMenu = useCallback(async (menuId) => {
     const updated = savedMenus.filter((m) => m.id !== menuId);
+    setSavedMenus(updated);
+    await store.set("saved-menus", updated);
+  }, [savedMenus]);
+
+  /* ─── Reorder saved menus ─── */
+  const moveSavedMenu = useCallback(async (index, direction) => {
+    const target = index + direction;
+    if (target < 0 || target >= savedMenus.length) return;
+    const updated = [...savedMenus];
+    [updated[index], updated[target]] = [updated[target], updated[index]];
     setSavedMenus(updated);
     await store.set("saved-menus", updated);
   }, [savedMenus]);
@@ -607,7 +620,7 @@ JSONのみ出力してください。` },
           {w > 0 && (
             <div className="grid grid-cols-2 gap-3 pt-1">
               <div className="bg-amber-50 rounded-lg p-3 text-center">
-                <p className="text-[11px] text-gray-500">必要カロリー (DER)</p>
+                <p className="text-[11px] text-gray-500">必要カロリー</p>
                 <p className="text-xl font-bold text-amber-700">{fmt(der)} <span className="text-sm font-normal">kcal</span></p>
               </div>
               <div className="bg-blue-50 rounded-lg p-3 text-center">
@@ -762,6 +775,44 @@ JSONのみ出力してください。` },
         {w > 0 && menuItems.length > 0 && (
           <section className="bg-white rounded-xl shadow p-4 space-y-3">
             <h2 className="font-bold text-amber-700 flex items-center gap-1.5"><span>📊</span> サマリー</h2>
+
+            {/* ── Goal buttons ── */}
+            <div className="flex gap-2">
+              <button
+                onClick={() => setGoalMode(goalMode === "diet" ? null : "diet")}
+                className={`flex-1 text-xs py-2 rounded-lg border transition font-semibold ${
+                  goalMode === "diet"
+                    ? "bg-blue-600 text-white border-blue-600"
+                    : "bg-white text-blue-600 border-blue-300 hover:bg-blue-50"
+                }`}
+              >🏃 ダイエット希望</button>
+              <button
+                onClick={() => setGoalMode(goalMode === "gain" ? null : "gain")}
+                className={`flex-1 text-xs py-2 rounded-lg border transition font-semibold ${
+                  goalMode === "gain"
+                    ? "bg-rose-600 text-white border-rose-600"
+                    : "bg-white text-rose-600 border-rose-300 hover:bg-rose-50"
+                }`}
+              >💪 体重UP希望</button>
+            </div>
+
+            {/* ── Goal calorie display ── */}
+            {goalMode && totals.kcal > 0 && (
+              <div className={`rounded-lg p-3 text-center space-y-1 ${
+                goalMode === "diet" ? "bg-blue-50 border border-blue-200" : "bg-rose-50 border border-rose-200"
+              }`}>
+                <p className="text-xs text-gray-600">
+                  {goalMode === "diet" ? "🎯 ダイエット目標（現在の-15%）" : "🎯 体重UP目標（現在の+15%）"}
+                </p>
+                <p className={`text-2xl font-bold ${goalMode === "diet" ? "text-blue-700" : "text-rose-700"}`}>
+                  {fmt(goalMode === "diet" ? totals.kcal * 0.85 : totals.kcal * 1.15)} kcal
+                </p>
+                <p className="text-xs text-gray-500">
+                  現在 {fmt(totals.kcal)} kcal → {goalMode === "diet" ? "-" : "+"}{fmt(totals.kcal * 0.15)} kcal
+                </p>
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-3">
               <div className="rounded-lg border p-3 space-y-1">
                 <p className="text-xs text-gray-500">カロリー</p>
@@ -770,7 +821,7 @@ JSONのみ出力してください。` },
                   {kcalDiff >= 0 ? `+${fmt(kcalDiff)} kcal (超過)` : `${fmt(kcalDiff)} kcal (不足)`}
                 </p>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  DER比 {fmt(kcalPctOfDer)}%（{kcalDiffPct >= 0 ? "+" : ""}{fmt(kcalDiffPct)}%）
+                  必要カロリーの {fmt(kcalPctOfDer)}%（{kcalDiffPct >= 0 ? "+" : ""}{fmt(kcalDiffPct)}%）
                 </p>
                 <div className="w-full bg-gray-200 rounded-full h-2 mt-1">
                   <div className={`h-2 rounded-full transition-all ${
@@ -836,16 +887,30 @@ JSONのみ出力してください。` },
               <span>📋</span> 保存済みメニュー
             </h2>
             <ul className="space-y-2">
-              {savedMenus.map((m) => (
-                <li key={m.id} className="flex items-center justify-between bg-gray-50 rounded-lg px-4 py-3">
-                  <div>
-                    <p className="font-medium">{m.name}</p>
+              {savedMenus.map((m, idx) => (
+                <li key={m.id} className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-3">
+                  <div className="flex flex-col gap-0.5">
+                    <button
+                      onClick={() => moveSavedMenu(idx, -1)}
+                      disabled={idx === 0}
+                      className="text-gray-400 hover:text-amber-600 disabled:opacity-20 text-sm leading-none p-0.5 transition"
+                      aria-label="上に移動"
+                    >▲</button>
+                    <button
+                      onClick={() => moveSavedMenu(idx, 1)}
+                      disabled={idx === savedMenus.length - 1}
+                      className="text-gray-400 hover:text-amber-600 disabled:opacity-20 text-sm leading-none p-0.5 transition"
+                      aria-label="下に移動"
+                    >▼</button>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium truncate">{m.name}</p>
                     <p className="text-xs text-gray-400">
                       {m.petName || "未設定"} / {m.items?.length || 0}商品
                       {m.savedAt && ` / ${new Date(m.savedAt).toLocaleDateString("ja-JP")}`}
                     </p>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 shrink-0">
                     <button
                       onClick={() => loadMenu(m)}
                       className="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1.5 rounded-lg transition"
