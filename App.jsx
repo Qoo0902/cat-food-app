@@ -129,7 +129,218 @@ function exportCSV(petName, weight, der, waterNeed, items, totals, dm) {
 /* ═══════════════════════════════════════════
    Main Component
    ═══════════════════════════════════════════ */
-export default function CatFoodCalculator() {
+const WORKER_BASE_URL = "https://cat-food-api.catchingdorcus.workers.dev";
+
+/* ═══════════════════════════════════════════
+   License Gate (認証画面)
+   ═══════════════════════════════════════════ */
+function LicenseGate({ onUnlock }) {
+  const [code, setCode] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [purchasing, setPurchasing] = useState(false);
+  const [postPurchaseMessage, setPostPurchaseMessage] = useState("");
+
+  // 決済成功で戻ってきた場合、URLパラメータからsession_idを取得してコード自動入力
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const checkout = params.get("checkout");
+    const sessionId = params.get("session_id");
+    if (checkout === "success" && sessionId) {
+      // URLから削除（再読込時に再実行されないように）
+      const cleanUrl = window.location.origin + window.location.pathname;
+      window.history.replaceState({}, "", cleanUrl);
+      // コード取得（Webhook処理が完了するまで最大10秒リトライ）
+      setPostPurchaseMessage("決済完了！コードを取得中...");
+      setLoading(true);
+      (async () => {
+        for (let i = 0; i < 10; i++) {
+          try {
+            const resp = await fetch(`${WORKER_BASE_URL}/get-license-by-session`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ sessionId }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (resp.ok && data.code) {
+              setCode(data.code);
+              setPostPurchaseMessage(`購入ありがとうございます！ライセンスコード: ${data.code}（自動入力されました）`);
+              setLoading(false);
+              return;
+            }
+            if (resp.status === 202) {
+              await new Promise(r => setTimeout(r, 1000));
+              continue;
+            }
+            setPostPurchaseMessage("コード取得に失敗しました。メールをご確認ください。");
+            setLoading(false);
+            return;
+          } catch {
+            await new Promise(r => setTimeout(r, 1000));
+          }
+        }
+        setPostPurchaseMessage("コード取得がタイムアウトしました。メールをご確認ください。");
+        setLoading(false);
+      })();
+    } else if (checkout === "cancel") {
+      setPostPurchaseMessage("決済がキャンセルされました。");
+      const cleanUrl = window.location.origin + window.location.pathname;
+      window.history.replaceState({}, "", cleanUrl);
+    }
+  }, []);
+
+  const handlePurchase = async () => {
+    setPurchasing(true);
+    setError("");
+    try {
+      const resp = await fetch(`${WORKER_BASE_URL}/create-checkout-session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.url) {
+        setError(data.error || "決済画面の準備に失敗しました");
+        setPurchasing(false);
+        return;
+      }
+      window.location.href = data.url;
+    } catch (err) {
+      setError("通信エラー: " + (err.message || "不明なエラー"));
+      setPurchasing(false);
+    }
+  };
+
+  const handleSubmit = async () => {
+    const trimmed = code.trim().toUpperCase();
+    if (!trimmed) { setError("コードを入力してください"); return; }
+    setLoading(true);
+    setError("");
+    try {
+      // デバイスID（localStorage に永続化）
+      let deviceId = localStorage.getItem("device-id");
+      if (!deviceId) {
+        deviceId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2));
+        localStorage.setItem("device-id", deviceId);
+      }
+      const resp = await fetch(`${WORKER_BASE_URL}/verify-code`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: trimmed, deviceId }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.ok) {
+        setError(data.reason || `認証エラー (${resp.status})`);
+        return;
+      }
+      const license = {
+        code: trimmed,
+        type: data.type,
+        expiresAt: data.expiresAt || null,
+        verifiedAt: new Date().toISOString(),
+      };
+      localStorage.setItem("license", JSON.stringify(license));
+      onUnlock(license);
+    } catch (err) {
+      setError("通信エラー: " + (err.message || "不明なエラー"));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-amber-50 to-orange-100 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-xl p-8 max-w-md w-full">
+        <div className="text-center mb-6">
+          <div className="text-5xl mb-2">🐱</div>
+          <h1 className="text-xl font-bold text-amber-800">くぅの食事管理アプリ</h1>
+          <p className="text-sm text-gray-600 mt-2">アクセスコードを入力してください</p>
+        </div>
+        {postPurchaseMessage && (
+          <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800 text-center">
+            {postPurchaseMessage}
+          </div>
+        )}
+        <input
+          type="text"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          placeholder="例: CM-XXXXXX"
+          className="w-full border-2 border-gray-300 rounded-lg px-4 py-3 text-center text-lg tracking-wider uppercase focus:border-amber-500 focus:outline-none"
+          onKeyDown={(e) => { if (e.key === "Enter") handleSubmit(); }}
+          disabled={loading}
+        />
+        {error && <p className="text-red-600 text-sm mt-3 text-center">{error}</p>}
+        <button
+          onClick={handleSubmit}
+          disabled={loading || !code.trim()}
+          className="w-full mt-4 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-300 text-white font-bold py-3 rounded-lg transition"
+        >
+          {loading ? "認証中..." : "アプリを開く"}
+        </button>
+
+        {/* 買い切り購入ボタン */}
+        <div className="mt-6 pt-6 border-t border-gray-200">
+          <p className="text-xs text-center text-gray-500 mb-3">コードをお持ちでない方</p>
+          <button
+            onClick={handlePurchase}
+            disabled={purchasing}
+            className="w-full bg-gradient-to-r from-purple-500 to-indigo-600 hover:from-purple-600 hover:to-indigo-700 disabled:opacity-50 text-white font-bold py-3 rounded-lg transition shadow-md"
+          >
+            {purchasing ? "決済画面を準備中..." : "💳 買い切り版を購入（¥1,980）"}
+          </button>
+          <p className="text-[10px] text-gray-400 text-center mt-2">
+            Stripe決済／決済完了後にコードが自動入力されます
+          </p>
+        </div>
+
+        <div className="mt-6 text-xs text-gray-500 space-y-2">
+          <p>📺 <strong>YouTubeメンバーシップ会員</strong>の方は、メンバー限定投稿で配布されるコードをご入力ください（月次更新）</p>
+          <p>💳 <strong>買い切り版（¥1,980）</strong>をご購入の方は、決済後にメールで届くコードをご入力ください（無期限）</p>
+          <p>🔒 買い切り版は1コードあたり3デバイスまで登録可能</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════
+   App Wrapper (License認証を先に処理)
+   ═══════════════════════════════════════════ */
+export default function App() {
+  const [license, setLicense] = useState(null);
+  const [licenseChecked, setLicenseChecked] = useState(false);
+
+  useEffect(() => {
+    const raw = localStorage.getItem("license");
+    if (raw) {
+      try {
+        const lic = JSON.parse(raw);
+        if (lic.expiresAt) {
+          const exp = new Date(lic.expiresAt);
+          if (new Date() > exp) {
+            localStorage.removeItem("license");
+            setLicenseChecked(true);
+            return;
+          }
+        }
+        setLicense(lic);
+      } catch { localStorage.removeItem("license"); }
+    }
+    setLicenseChecked(true);
+  }, []);
+
+  const handleLogout = () => {
+    localStorage.removeItem("license");
+    setLicense(null);
+  };
+
+  if (!licenseChecked) return null;
+  if (!license) return <LicenseGate onUnlock={setLicense} />;
+  return <CatFoodCalculator license={license} onLogout={handleLogout} />;
+}
+
+function CatFoodCalculator({ license, onLogout }) {
   /* ─── Current editing state ─── */
   const [petName, setPetName] = useState("");
   const [weight, setWeight] = useState("");
@@ -700,13 +911,17 @@ JSONのみ出力してください。`
     }
   };
 
-  /* ─── Scan food label image (Gemini or Tesseract) ─── */
-  const scanWithGemini = async (file) => {
-    const base64 = await new Promise((resolve) => {
-      const r = new FileReader();
-      r.onload = () => resolve(r.result.split(",")[1]);
-      r.readAsDataURL(file);
-    });
+  /* ─── Scan food label image (Gemini Vision: 自分のAPIキー優先、なければWorkers経由) ─── */
+  const WORKER_URL_SCAN = "https://cat-food-api.catchingdorcus.workers.dev";
+
+  const fileToBase64 = (file) => new Promise((resolve) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result.split(",")[1]);
+    r.readAsDataURL(file);
+  });
+
+  const scanWithGeminiDirect = async (file) => {
+    const base64 = await fileToBase64(file);
     const resp = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
       {
@@ -747,6 +962,20 @@ JSONのみ出力してください。` },
     return JSON.parse(jsonMatch[0]);
   };
 
+  const scanWithWorker = async (file) => {
+    const base64 = await fileToBase64(file);
+    const resp = await fetch(`${WORKER_URL_SCAN}/scan-label`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: base64, mimeType: file.type || "image/jpeg" }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      throw new Error(data?.error || `サーバーエラー (${resp.status})`);
+    }
+    return data?.data || null;
+  };
+
   const scanWithTesseract = async (file) => {
     const { data: { text } } = await Tesseract.recognize(file, "jpn", {
       logger: () => {},
@@ -780,9 +1009,11 @@ JSONのみ出力してください。` },
     try {
       let parsed = null;
       if (geminiKey) {
-        parsed = await scanWithGemini(file);
+        // 飼い主さんが自分のAPIキーを登録済み → 直接Gemini（無制限）
+        parsed = await scanWithGeminiDirect(file);
       } else {
-        parsed = await scanWithTesseract(file);
+        // 未登録 → Workers経由（先生のAPIキー、1日5回制限）
+        parsed = await scanWithWorker(file);
       }
       if (parsed) {
         setNewFood((p) => ({
@@ -1381,7 +1612,7 @@ JSONのみ出力してください。` },
                     </div>
                     {!aiSearching && (
                       <span className="text-[10px] text-gray-400">
-                        {geminiKey ? "自分のAPIキー使用・無制限" : "1日10回まで"}　※100%正確とは限りません
+                        {geminiKey ? "自分のAPIキー使用・無制限" : "1日5回まで"}　※100%正確とは限りません
                       </span>
                     )}
                   </button>
@@ -1396,7 +1627,7 @@ JSONのみ出力してください。` },
                       </span>
                     </div>
                     <span className="text-[10px] text-gray-400">
-                      {geminiKey ? "Gemini AI（高精度）" : "登録不要・そのまま使えます"}
+                      {geminiKey ? "Gemini AI（自分のキー・無制限）" : "Gemini AI（高精度）・1日5回まで"}
                     </span>
                     <input type="file" accept="image/*" capture="environment" onChange={scanFoodLabel}
                       disabled={scanning} className="hidden" />

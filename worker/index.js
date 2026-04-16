@@ -17,6 +17,23 @@ const GEMINI_PROMPT = `あなたはキャットフードの成分データベー
 }
 JSONのみ出力してください。`;
 
+const SCAN_PROMPT = `この画像はキャットフードの成分表（保証分析値・保証成分分析値）です。
+以下のJSON形式で数値を抽出してください。
+数値が見つからない項目は 0 にしてください。商品名も読み取れれば入れてください。
+カロリーは「○○gあたり○○kcal」の形で読み取り、kcalGramsとkcalValueに入れてください。
+キャットフードの成分表以外の画像だった場合は {"error":"not_food_label"} のみ返してください。
+{
+  "name": "商品名",
+  "protein": タンパク質の数値,
+  "fat": 脂質の数値,
+  "fiber": 粗繊維の数値,
+  "ash": 灰分の数値,
+  "moisture": 水分の数値,
+  "kcalGrams": カロリー表記の何gの部分,
+  "kcalValue": カロリー表記の何kcalの部分
+}
+JSONのみ出力してください。`;
+
 function corsHeaders(origin, allowed) {
   if (origin !== allowed) return {};
   return {
@@ -26,9 +43,94 @@ function corsHeaders(origin, allowed) {
   };
 }
 
-function todayKey(ip) {
+function todayKey(ip, kind = "") {
   const d = new Date().toISOString().slice(0, 10);
-  return `rate:${ip}:${d}`;
+  return kind ? `rate:${kind}:${ip}:${d}` : `rate:${ip}:${d}`;
+}
+
+function globalTodayKey() {
+  const d = new Date().toISOString().slice(0, 10);
+  return `rate:global:${d}`;
+}
+
+// 無料枠（1日1500req）超過で課金が発生するのを防ぐ安全弁
+const GLOBAL_DAILY_LIMIT = 1400;
+
+/* ═══════════════════════════════════════════
+   Stripe helpers
+   ═══════════════════════════════════════════ */
+// 買い切り用ライセンスコード生成（CATFOOD-XXXXXX）
+function generateLicenseCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let s = "";
+  for (let i = 0; i < 6; i++) {
+    s += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return `CATFOOD-${s}`;
+}
+
+// Stripe Webhook署名検証（HMAC-SHA256）
+async function verifyStripeSignature(payload, sigHeader, secret) {
+  if (!sigHeader || !secret) return null;
+  const parts = sigHeader.split(",").reduce((m, p) => {
+    const [k, v] = p.split("=");
+    m[k] = v;
+    return m;
+  }, {});
+  const timestamp = parts.t;
+  const v1 = parts.v1;
+  if (!timestamp || !v1) return null;
+  const signedPayload = `${timestamp}.${payload}`;
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const sigBytes = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signedPayload));
+  const hex = Array.from(new Uint8Array(sigBytes)).map(b => b.toString(16).padStart(2, "0")).join("");
+  if (hex !== v1) return null;
+  try { return JSON.parse(payload); } catch { return null; }
+}
+
+// Stripe API 呼び出しヘルパー
+async function stripeFetch(env, path, params) {
+  const formData = new URLSearchParams();
+  function flatten(obj, prefix) {
+    for (const [k, v] of Object.entries(obj)) {
+      const key = prefix ? `${prefix}[${k}]` : k;
+      if (v && typeof v === "object" && !Array.isArray(v)) flatten(v, key);
+      else if (Array.isArray(v)) v.forEach((item, i) => {
+        if (typeof item === "object") flatten(item, `${key}[${i}]`);
+        else formData.append(`${key}[${i}]`, String(item));
+      });
+      else if (v !== undefined && v !== null) formData.append(key, String(v));
+    }
+  }
+  if (params) flatten(params);
+  const resp = await fetch(`https://api.stripe.com/v1${path}`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.STRIPE_SECRET_KEY}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: formData.toString(),
+  });
+  return { ok: resp.ok, status: resp.status, data: await resp.json() };
+}
+
+async function checkGlobalLimit(env) {
+  const key = globalTodayKey();
+  let count = 0;
+  try {
+    const val = await env.RATE_LIMIT.get(key);
+    count = val ? parseInt(val) : 0;
+  } catch {}
+  return { count, exceeded: count >= GLOBAL_DAILY_LIMIT, key };
+}
+
+async function incrementGlobalCount(env, currentCount, key) {
+  try {
+    await env.RATE_LIMIT.put(key, String(currentCount + 1), { expirationTtl: 86400 });
+  } catch {}
 }
 
 function jsonResponse(data, status, headers) {
@@ -53,6 +155,185 @@ export default {
     // CORS check
     if (origin !== allowed) {
       return jsonResponse({ error: "Forbidden" }, 403, {});
+    }
+
+    // ─── Stripe: Create Checkout Session ───
+    // POST /create-checkout-session { origin? }
+    // → { url: "https://checkout.stripe.com/..." }
+    if (path === "/create-checkout-session" && request.method === "POST") {
+      try {
+        if (!env.STRIPE_SECRET_KEY || !env.STRIPE_PRICE_ID) {
+          return jsonResponse({ error: "Stripe未設定" }, 500, headers);
+        }
+        let body = {};
+        try { body = await request.json(); } catch {}
+        const appOrigin = allowed; // https://qoo0902.github.io
+        const successUrl = `${appOrigin}/cat-food-app/?checkout=success&session_id={CHECKOUT_SESSION_ID}`;
+        const cancelUrl = `${appOrigin}/cat-food-app/?checkout=cancel`;
+
+        const res = await stripeFetch(env, "/checkout/sessions", {
+          mode: "payment",
+          "line_items[0][price]": env.STRIPE_PRICE_ID,
+          "line_items[0][quantity]": "1",
+          success_url: successUrl,
+          cancel_url: cancelUrl,
+          customer_creation: "always",
+          "payment_intent_data[metadata][app]": "cat-food-app",
+          "metadata[app]": "cat-food-app",
+          allow_promotion_codes: "true",
+        });
+        if (!res.ok) {
+          return jsonResponse({ error: res.data?.error?.message || "Checkout作成失敗" }, 502, headers);
+        }
+        return jsonResponse({ url: res.data.url, sessionId: res.data.id }, 200, headers);
+      } catch (err) {
+        return jsonResponse({ error: "Checkout処理エラー" }, 500, headers);
+      }
+    }
+
+    // ─── Stripe: Webhook receiver ───
+    // checkout.session.completed でライセンスコード自動発行
+    if (path === "/stripe-webhook" && request.method === "POST") {
+      try {
+        if (!env.STRIPE_WEBHOOK_SECRET) {
+          return jsonResponse({ error: "Webhook secret 未設定" }, 500, {});
+        }
+        const sig = request.headers.get("stripe-signature");
+        const rawBody = await request.text();
+        const event = await verifyStripeSignature(rawBody, sig, env.STRIPE_WEBHOOK_SECRET);
+        if (!event) {
+          return jsonResponse({ error: "Invalid signature" }, 400, {});
+        }
+
+        if (event.type === "checkout.session.completed") {
+          const session = event.data.object;
+          const sessionId = session.id;
+
+          // すでに発行済み（重複受信対策）
+          const existing = await env.RATE_LIMIT.get(`session:${sessionId}`);
+          if (existing) {
+            return jsonResponse({ received: true, code: existing, duplicate: true }, 200, {});
+          }
+
+          // ランダムコード生成（衝突対策で最大5回リトライ）
+          let code = null;
+          for (let i = 0; i < 5; i++) {
+            const candidate = generateLicenseCode();
+            const exists = await env.RATE_LIMIT.get(`license:${candidate}`);
+            if (!exists) { code = candidate; break; }
+          }
+          if (!code) {
+            return jsonResponse({ error: "コード生成失敗" }, 500, {});
+          }
+
+          const lic = {
+            type: "paid",
+            email: session.customer_details?.email || session.customer_email || null,
+            customerId: session.customer || null,
+            stripeSessionId: sessionId,
+            devices: [],
+            expiresAt: null, // 無期限
+            purchasedAt: new Date().toISOString(),
+            amountTotal: session.amount_total,
+            currency: session.currency,
+          };
+          await env.RATE_LIMIT.put(`license:${code}`, JSON.stringify(lic), { expirationTtl: 10 * 365 * 86400 });
+          await env.RATE_LIMIT.put(`session:${sessionId}`, code, { expirationTtl: 30 * 86400 });
+        }
+
+        return jsonResponse({ received: true }, 200, {});
+      } catch (err) {
+        return jsonResponse({ error: "Webhook処理エラー" }, 500, {});
+      }
+    }
+
+    // ─── License: Get code by Stripe session ID（決済成功後の初期表示用） ───
+    // POST /get-license-by-session { sessionId }
+    // → { code: "CATFOOD-XXXXXX" } or { error }
+    if (path === "/get-license-by-session" && request.method === "POST") {
+      try {
+        let body;
+        try { body = await request.json(); } catch { return jsonResponse({ error: "invalid_json" }, 400, headers); }
+        const sessionId = String(body.sessionId || "").trim();
+        if (!sessionId) return jsonResponse({ error: "sessionIdが必要です" }, 400, headers);
+        // 署名検証：Stripe APIでセッションが本物か確認
+        if (!env.STRIPE_SECRET_KEY) return jsonResponse({ error: "未設定" }, 500, headers);
+        const verify = await fetch(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, {
+          headers: { "Authorization": `Bearer ${env.STRIPE_SECRET_KEY}` },
+        });
+        if (!verify.ok) return jsonResponse({ error: "セッション検証失敗" }, 404, headers);
+        const sessionData = await verify.json();
+        if (sessionData.payment_status !== "paid") {
+          return jsonResponse({ error: "支払い未完了です" }, 403, headers);
+        }
+
+        // コード取得（Webhook処理後にKVに入る）
+        const code = await env.RATE_LIMIT.get(`session:${sessionId}`);
+        if (!code) {
+          return jsonResponse({ error: "コード発行処理中です。数秒後にもう一度お試しください。" }, 202, headers);
+        }
+        return jsonResponse({ code, email: sessionData.customer_details?.email }, 200, headers);
+      } catch (err) {
+        return jsonResponse({ error: "取得処理エラー" }, 500, headers);
+      }
+    }
+
+    // ─── License: Verify access code ───
+    // POST /verify-code { code, deviceId }
+    // レスポンス: {ok:true, type:"member"|"paid", expiresAt:"..."} or {ok:false, reason:"..."}
+    if (path === "/verify-code" && request.method === "POST") {
+      try {
+        let body;
+        try { body = await request.json(); } catch { return jsonResponse({ ok:false, reason:"invalid_json" }, 400, headers); }
+        const code = String(body.code || "").trim().toUpperCase();
+        const deviceId = String(body.deviceId || "").trim();
+        const MAX_DEVICES = 3;
+
+        if (!code || code.length < 4) return jsonResponse({ ok:false, reason:"コードが短すぎます" }, 400, headers);
+        if (!deviceId) return jsonResponse({ ok:false, reason:"デバイスIDが必要です" }, 400, headers);
+
+        const raw = await env.RATE_LIMIT.get(`license:${code}`);
+        if (!raw) return jsonResponse({ ok:false, reason:"このコードは無効です" }, 404, headers);
+
+        let lic;
+        try { lic = JSON.parse(raw); } catch { return jsonResponse({ ok:false, reason:"ライセンス情報が壊れています" }, 500, headers); }
+
+        // 期限チェック
+        if (lic.expiresAt) {
+          const now = new Date();
+          const exp = new Date(lic.expiresAt);
+          if (now > exp) return jsonResponse({ ok:false, reason:"このコードは有効期限が切れています" }, 403, headers);
+        }
+
+        // デバイス登録チェック
+        // - type="member": 全体配布コードなのでデバイス無制限（拡散対策は月次更新で担保）
+        // - type="paid": 個別購入コードなので3台まで
+        lic.devices = Array.isArray(lic.devices) ? lic.devices : [];
+        const deviceLimitApplies = lic.type !== "member";
+
+        if (!lic.devices.includes(deviceId)) {
+          if (deviceLimitApplies && lic.devices.length >= MAX_DEVICES) {
+            return jsonResponse({ ok:false, reason:`このコードはすでに${MAX_DEVICES}台で使用中です` }, 403, headers);
+          }
+          // memberはデバイスリストを記録するが上限はチェックしない（統計用）
+          // devicesリストが肥大化しないよう、memberは先頭1000件まで保持
+          lic.devices.push(deviceId);
+          if (lic.type === "member" && lic.devices.length > 1000) {
+            lic.devices = lic.devices.slice(-1000);
+          }
+          await env.RATE_LIMIT.put(`license:${code}`, JSON.stringify(lic), { expirationTtl: 365 * 86400 });
+        }
+
+        return jsonResponse({
+          ok: true,
+          type: lic.type || "member",
+          expiresAt: lic.expiresAt || null,
+          devicesUsed: lic.devices.length,
+          maxDevices: deviceLimitApplies ? MAX_DEVICES : null,
+        }, 200, headers);
+      } catch (err) {
+        return jsonResponse({ ok:false, reason:"認証処理でエラーが発生しました" }, 500, headers);
+      }
     }
 
     // ─── Backup: Save data ───
@@ -85,6 +366,103 @@ export default {
       }
     }
 
+    // ─── Scan food label image (Gemini Vision) ───
+    if (path === "/scan-label" && request.method === "POST") {
+      const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+      const limit = 5; // 撮影は1日5回/IP
+      const rateKey = todayKey(ip, "scan");
+
+      // グローバル上限（無料枠超過防止の安全弁）
+      const g = await checkGlobalLimit(env);
+      if (g.exceeded) {
+        return jsonResponse({ error: "本日のAI機能は全体の上限に達しました。明日またお試しください。" }, 429, headers);
+      }
+
+      let count = 0;
+      try {
+        const val = await env.RATE_LIMIT.get(rateKey);
+        count = val ? parseInt(val) : 0;
+      } catch {}
+
+      if (count >= limit) {
+        return jsonResponse({ error: `成分表撮影は1日${limit}回の上限に達しました。明日またお試しください。` }, 429, headers);
+      }
+
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return jsonResponse({ error: "Invalid JSON" }, 400, headers);
+      }
+
+      const imageBase64 = (body.image || "").trim();
+      const mimeType = (body.mimeType || "image/jpeg").trim();
+      if (!imageBase64) {
+        return jsonResponse({ error: "画像データが必要です" }, 400, headers);
+      }
+      // サイズ制限：base64で約10MB（画像実体 ~7MB）まで
+      if (imageBase64.length > 10 * 1024 * 1024) {
+        return jsonResponse({ error: "画像サイズが大きすぎます" }, 413, headers);
+      }
+
+      const geminiKey = env.GEMINI_API_KEY;
+      if (!geminiKey) {
+        return jsonResponse({ error: "Server configuration error" }, 500, headers);
+      }
+
+      try {
+        const resp = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{
+                parts: [
+                  { text: SCAN_PROMPT },
+                  { inlineData: { mimeType, data: imageBase64 } },
+                ],
+              }],
+              generationConfig: { temperature: 0.1 },
+            }),
+          }
+        );
+
+        if (!resp.ok) {
+          return jsonResponse({ error: "画像解析に失敗しました" }, 502, headers);
+        }
+
+        const data = await resp.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+
+        if (!jsonMatch) {
+          return jsonResponse({ error: "成分情報を取得できませんでした" }, 404, headers);
+        }
+
+        let parsed;
+        try {
+          parsed = JSON.parse(jsonMatch[0]);
+        } catch {
+          return jsonResponse({ error: "AIの応答を解析できませんでした" }, 502, headers);
+        }
+
+        if (parsed && parsed.error === "not_food_label") {
+          return jsonResponse({ error: "キャットフードの成分表が検出できませんでした" }, 422, headers);
+        }
+
+        try {
+          await env.RATE_LIMIT.put(rateKey, String(count + 1), { expirationTtl: 86400 });
+        } catch {}
+        // グローバルカウントも加算
+        await incrementGlobalCount(env, g.count, g.key);
+
+        return jsonResponse({ data: parsed, remaining: limit - count - 1 }, 200, headers);
+      } catch (err) {
+        return jsonResponse({ error: "画像解析中にエラーが発生しました" }, 500, headers);
+      }
+    }
+
     // ─── AI food search (existing) ───
     if (request.method !== "POST") {
       return jsonResponse({ error: "Method not allowed" }, 405, headers);
@@ -92,8 +470,14 @@ export default {
 
     // Rate limiting
     const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-    const limit = parseInt(env.DAILY_LIMIT) || 10;
-    const rateKey = todayKey(ip);
+    const limit = 5; // AI自動入力は1日5回/IP
+    const rateKey = todayKey(ip, "search");
+
+    // グローバル上限（無料枠超過防止の安全弁）
+    const g2 = await checkGlobalLimit(env);
+    if (g2.exceeded) {
+      return jsonResponse({ error: "本日のAI機能は全体の上限に達しました。明日またお試しください。" }, 429, headers);
+    }
 
     let count = 0;
     try {
@@ -102,7 +486,7 @@ export default {
     } catch {}
 
     if (count >= limit) {
-      return jsonResponse({ error: `1日${limit}回の上限に達しました。明日またお試しください。` }, 429, headers);
+      return jsonResponse({ error: `AI自動入力は1日${limit}回の上限に達しました。明日またお試しください。` }, 429, headers);
     }
 
     let body;
@@ -152,6 +536,8 @@ export default {
       try {
         await env.RATE_LIMIT.put(rateKey, String(count + 1), { expirationTtl: 86400 });
       } catch {}
+      // グローバルカウントも加算
+      await incrementGlobalCount(env, g2.count, g2.key);
 
       const parsed = JSON.parse(jsonMatch[0]);
       return jsonResponse({ data: parsed, remaining: limit - count - 1 }, 200, headers);
