@@ -1,0 +1,11 @@
+name = "cat-food-api"
+main = "index.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+ALLOWED_ORIGIN = "https://qoo0902.github.io"
+DAILY_LIMIT = "10"
+
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "6b1e8cf230fa4ffe91ef39387ba67c01"

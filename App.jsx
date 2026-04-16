@@ -1,6 +1,19 @@
 import { useState, useEffect, useCallback } from "react";
 import Tesseract from "tesseract.js";
 
+/* ─── Cookie helpers (survives localStorage clear) ─── */
+const cookie = {
+  get(name) {
+    const m = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
+    return m ? decodeURIComponent(m[1]) : null;
+  },
+  set(name, value, days = 3650) {
+    const d = new Date();
+    d.setTime(d.getTime() + days * 86400000);
+    document.cookie = `${name}=${encodeURIComponent(value)};expires=${d.toUTCString()};path=/;SameSite=Lax`;
+  },
+};
+
 /* ─── Storage abstraction ─── */
 const store = {
   async get(key) {
@@ -147,31 +160,91 @@ export default function CatFoodCalculator() {
   const [geminiKey, setGeminiKey] = useState("");
   const [showApiSettings, setShowApiSettings] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [aiSearching, setAiSearching] = useState(false);
 
-  /* ─── Load ─── */
+  /* ─── Cloud backup ─── */
+  const [backupCode, setBackupCode] = useState("");
+  const [restoreCode, setRestoreCode] = useState("");
+  const [backupStatus, setBackupStatus] = useState("");
+
+  /* ─── Load (with auto-restore from cloud) ─── */
   useEffect(() => {
     (async () => {
-      const master = await store.get("food-master") || [];
+      let master = await store.get("food-master") || [];
+      const petInfo = await store.get("pet-info");
+      const current = await store.get("current-menu");
+
+      // Check if local data exists
+      const hasLocalData = master.length > 0 || petInfo || (current && current.items?.length > 0);
+
+      // Get backup code from localStorage or cookie
+      let code = await store.get("backup-code");
+      if (!code) code = cookie.get("catfood-backup");
+
+      // Auto-restore from cloud if local data is empty but backup code exists
+      if (!hasLocalData && code) {
+        try {
+          const resp = await fetch(`${WORKER_URL}/restore`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code }),
+          });
+          if (resp.ok) {
+            const result = await resp.json();
+            const d = result.data;
+            if (d) {
+              if (d.petName) setPetName(d.petName);
+              if (d.weight) setWeight(String(d.weight));
+              if (d.foodMaster?.length) { master = d.foodMaster; await store.set("food-master", master); }
+              if (d.menuItems?.length) setMenuItems(d.menuItems);
+              if (d.savedMenus?.length) { setSavedMenus(d.savedMenus); await store.set("saved-menus", d.savedMenus); }
+              await store.set("pet-info", { petName: d.petName || "", weight: d.weight || "" });
+              await store.set("backup-code", code);
+            }
+          }
+        } catch {}
+      } else {
+        // Normal local load
+        if (petInfo) {
+          setPetName(petInfo.petName || "");
+          setWeight(petInfo.weight || "");
+        }
+        if (current) {
+          if (!petInfo && current.petName) setPetName(current.petName);
+          if (!petInfo && current.weight) setWeight(String(current.weight));
+          setMenuItems(current.items || []);
+        }
+        const saved = await store.get("saved-menus");
+        if (saved) setSavedMenus(saved);
+      }
+
+      // Ensure water is in master
       const WATER = { id: "__water__", name: "水", protein: 0, fat: 0, fiber: 0, ash: 0, moisture: 100, kcalPer100g: 0, isComplete: false };
       if (!master.find((f) => f.id === "__water__")) master.unshift(WATER);
       setFoodMaster(master);
 
-      const current = await store.get("current-menu");
-      if (current) {
-        setPetName(current.petName || "");
-        setWeight(current.weight || "");
-        setMenuItems(current.items || []);
-      }
-
-      const saved = await store.get("saved-menus");
-      if (saved) setSavedMenus(saved);
-
       const apiKey = await store.get("gemini-api-key");
       if (apiKey) setGeminiKey(apiKey);
+
+      // Auto-generate backup code if none exists
+      if (!code) {
+        const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        code = "";
+        for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+        await store.set("backup-code", code);
+      }
+      setBackupCode(code);
+      cookie.set("catfood-backup", code);
 
       setLoaded(true);
     })();
   }, []);
+
+  /* ─── Auto-save pet info separately ─── */
+  useEffect(() => {
+    if (!loaded) return;
+    store.set("pet-info", { petName, weight: weight });
+  }, [petName, weight, loaded]);
 
   /* ─── Auto-save current editing state ─── */
   useEffect(() => {
@@ -182,6 +255,51 @@ export default function CatFoodCalculator() {
       items: menuItems,
     });
   }, [petName, weight, menuItems, loaded]);
+
+  /* ─── Cloud backup (auto-save on data change) ─── */
+  useEffect(() => {
+    if (!loaded || !backupCode) return;
+    const timer = setTimeout(async () => {
+      try {
+        await fetch(`${WORKER_URL}/backup`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            code: backupCode,
+            data: { petName, weight, foodMaster, menuItems, savedMenus },
+          }),
+        });
+        cookie.set("catfood-backup", backupCode);
+      } catch {}
+    }, 2000); // 2秒デバウンス
+    return () => clearTimeout(timer);
+  }, [petName, weight, foodMaster, menuItems, savedMenus, backupCode, loaded]);
+
+  const restoreFromCloud = useCallback(async (code) => {
+    try {
+      const resp = await fetch(`${WORKER_URL}/restore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      const result = await resp.json();
+      if (!resp.ok) { alert(result.error || "復元に失敗しました"); return false; }
+      const d = result.data;
+      if (d.petName) setPetName(d.petName);
+      if (d.weight) setWeight(String(d.weight));
+      if (d.foodMaster?.length) { setFoodMaster(d.foodMaster); await store.set("food-master", d.foodMaster); }
+      if (d.menuItems?.length) setMenuItems(d.menuItems);
+      if (d.savedMenus?.length) { setSavedMenus(d.savedMenus); await store.set("saved-menus", d.savedMenus); }
+      setBackupCode(code);
+      await store.set("backup-code", code);
+      await store.set("pet-info", { petName: d.petName || "", weight: d.weight || "" });
+      alert("データを復元しました！");
+      return true;
+    } catch (err) {
+      alert("復元に失敗しました: " + err.message);
+      return false;
+    }
+  }, []);
 
   /* ─── Save master ─── */
   const saveMaster = useCallback(async (m) => {
@@ -244,7 +362,7 @@ export default function CatFoodCalculator() {
     await store.set("saved-menus", updated);
   }, [savedMenus]);
 
-  /* ─── Reset all data ─── */
+  /* ─── Reset all data (pet info is preserved) ─── */
   const resetAllData = useCallback(async () => {
     await store.remove("current-menu");
     await store.remove("food-master");
@@ -252,9 +370,8 @@ export default function CatFoodCalculator() {
     // Also clean up old format keys
     await store.remove("menus-list");
     await store.remove("active-menu-id");
+    // Note: pet-info is intentionally NOT removed
 
-    setPetName("");
-    setWeight("");
     setMenuItems([]);
     setFoodMaster([]);
     setSavedMenus([]);
@@ -415,20 +532,21 @@ export default function CatFoodCalculator() {
       const moistureIdx = header.findIndex((h) => /水分|moisture/i.test(h));
       const kcalIdx = header.findIndex((h) => /kcal.*100|カロリー/i.test(h));
       const completeIdx = header.findIndex((h) => /総合栄養食|complete/i.test(h));
+      const amountIdx = header.findIndex((h) => /給餌量|amount/i.test(h));
 
       let imported = 0, skipped = 0;
       const existingNames = new Set(foodMaster.map((f) => f.name));
-      const newItems = [];
+      const newMasterItems = [];
+      const newMenuItems = [];
 
       const SKIP_NAMES = /^(合計|DM|糖質|タンパク質|脂質|粗繊維|灰分|水分|[\d.]+%?)$/;
       for (let i = headerIdx + 1; i < lines.length; i++) {
         const cols = lines[i].split(",").map((c) => c.trim());
         const name = cols[nameIdx];
-        if (!name || name === "合計") break; // 合計行以降は集計データなので終了
+        if (!name || name === "合計") break;
         if (SKIP_NAMES.test(name)) continue;
-        if (existingNames.has(name)) { skipped++; continue; }
 
-        newItems.push({
+        const foodData = {
           id: uid(),
           name,
           protein: parseFloat(cols[proteinIdx]) || 0,
@@ -438,13 +556,47 @@ export default function CatFoodCalculator() {
           moisture: parseFloat(cols[moistureIdx]) || 0,
           kcalPer100g: parseFloat(cols[kcalIdx]) || 0,
           isComplete: completeIdx >= 0 ? /true|1|○|はい|yes/i.test(cols[completeIdx]) : false,
-        });
-        existingNames.add(name);
+        };
+
+        // Add to master if not already registered
+        if (!existingNames.has(name)) {
+          newMasterItems.push(foodData);
+          existingNames.add(name);
+        }
+
+        // Add to menu with feeding amount
+        const amount = amountIdx >= 0 ? parseFloat(cols[amountIdx]) || 0 : 0;
+        if (amount > 0) {
+          const masterFood = existingNames.has(name)
+            ? [...foodMaster, ...newMasterItems].find((f) => f.name === name) || foodData
+            : foodData;
+          newMenuItems.push({ id: uid(), food: { ...masterFood }, amount });
+        }
+
         imported++;
       }
 
-      if (newItems.length > 0) saveMaster([...foodMaster, ...newItems]);
-      alert(`${imported}件インポート${skipped > 0 ? `、${skipped}件スキップ（重複）` : ""}`);
+      if (newMasterItems.length > 0) saveMaster([...foodMaster, ...newMasterItems]);
+      if (newMenuItems.length > 0) {
+        setMenuItems(newMenuItems);
+        // Also save as a preset menu
+        const csvName = file.name.replace(/\.csv$/i, "").replace(/^.*_/, "") || "インポート";
+        const newSaved = {
+          id: uid(),
+          name: csvName,
+          petName,
+          weight: parseFloat(weight) || 0,
+          items: [...newMenuItems],
+          savedAt: new Date().toISOString(),
+        };
+        const updatedMenus = [...savedMenus, newSaved];
+        setSavedMenus(updatedMenus);
+        store.set("saved-menus", updatedMenus);
+        setLoadedMenuId(newSaved.id);
+      }
+
+      const menuMsg = newMenuItems.length > 0 ? `、保存済みメニューに登録しました` : "";
+      alert(`${imported}件インポート${skipped > 0 ? `、${skipped}件スキップ（重複）` : ""}${menuMsg}`);
     };
     reader.readAsText(file);
     e.target.value = "";
@@ -455,6 +607,98 @@ export default function CatFoodCalculator() {
     setGeminiKey(key);
     await store.set("gemini-api-key", key);
   }, []);
+
+  /* ─── AI auto-fill from product name ─── */
+  const WORKER_URL = "https://cat-food-api.catchingdorcus.workers.dev";
+
+  const aiAutoFillViaWorker = async (name) => {
+    const resp = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || `エラー (${resp.status})`);
+    return result;
+  };
+
+  const aiAutoFillDirect = async (name) => {
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{
+            parts: [{
+              text: `あなたはキャットフードの成分データベースです。
+以下の商品名のキャットフードの保証分析値（成分表）を教えてください。
+
+商品名: ${name}
+
+以下のJSON形式のみ出力してください。数値が不明な項目は null にしてください。
+{
+  "name": "正式な商品名",
+  "protein": タンパク質の%数値,
+  "fat": 脂質の%数値,
+  "fiber": 粗繊維の%数値,
+  "ash": 灰分の%数値,
+  "moisture": 水分の%数値,
+  "kcalGrams": カロリー表記の何gの部分(数値),
+  "kcalValue": カロリー表記の何kcalの部分(数値),
+  "isComplete": 総合栄養食ならtrue、一般食・おやつならfalse
+}
+JSONのみ出力してください。`
+            }],
+          }],
+          generationConfig: { temperature: 0.1 },
+        }),
+      }
+    );
+    if (!resp.ok) throw new Error(`Gemini API エラー (${resp.status})`);
+    const data = await resp.json();
+    if (data?.error) throw new Error(`Gemini API: ${data.error.message}`);
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    return { data: JSON.parse(jsonMatch[0]) };
+  };
+
+  const aiAutoFill = async () => {
+    const name = newFood.name.trim();
+    if (!name) { alert("商品名を入力してください"); return; }
+    setAiSearching(true);
+    try {
+      let result;
+      if (geminiKey) {
+        result = await aiAutoFillDirect(name);
+      } else {
+        result = await aiAutoFillViaWorker(name);
+      }
+      if (!result?.data) { alert("成分情報を取得できませんでした。商品名を正確に入力してみてください。"); return; }
+      const parsed = result.data;
+      setNewFood((p) => ({
+        ...p,
+        name: parsed.name || p.name,
+        protein: parsed.protein != null ? String(parsed.protein) : p.protein,
+        fat: parsed.fat != null ? String(parsed.fat) : p.fat,
+        fiber: parsed.fiber != null ? String(parsed.fiber) : p.fiber,
+        ash: parsed.ash != null ? String(parsed.ash) : p.ash,
+        moisture: parsed.moisture != null ? String(parsed.moisture) : p.moisture,
+        kcalGrams: parsed.kcalGrams != null ? String(parsed.kcalGrams) : p.kcalGrams,
+        kcalValue: parsed.kcalValue != null ? String(parsed.kcalValue) : p.kcalValue,
+        isComplete: parsed.isComplete ?? p.isComplete,
+      }));
+      const msg = result.remaining != null
+        ? `成分情報を取得しました！（本日残り${result.remaining}回）\n内容を確認してください。`
+        : "成分情報を取得しました！内容を確認してください。";
+      alert(msg);
+    } catch (err) {
+      alert("成分情報の取得に失敗しました: " + err.message);
+    } finally {
+      setAiSearching(false);
+    }
+  };
 
   /* ─── Scan food label image (Gemini or Tesseract) ─── */
   const scanWithGemini = async (file) => {
@@ -974,7 +1218,7 @@ JSONのみ出力してください。` },
 
           {/* New menu button */}
           <button
-            onClick={() => { setPetName(""); setWeight(""); setMenuItems([]); setLoadedMenuId(null); }}
+            onClick={() => { setMenuItems([]); setLoadedMenuId(null); }}
             className="w-full bg-white border-2 border-gray-300 text-gray-600 hover:bg-gray-50 py-3 rounded-xl font-medium transition flex items-center justify-center gap-2"
           >
             <span>✨</span> 新しいメニューを作る
@@ -1030,6 +1274,25 @@ JSONのみ出力してください。` },
                   で無料で取得できます。APIキーは端末内にのみ保存されます。
                 </p>
               </label>
+
+              {/* Cloud backup */}
+              <div className="border-t pt-3 mt-3 space-y-2">
+                <p className="text-sm font-medium text-gray-700">☁ クラウドバックアップ</p>
+                <div className="bg-green-50 border border-green-200 rounded-lg p-3 space-y-1">
+                  <p className="text-xs text-green-700">自動バックアップ有効</p>
+                  <p className="text-[10px] text-gray-500">データは自動で保存・復元されます。別の端末で使う場合は以下のコードを入力してください。</p>
+                  <p className="text-lg font-mono font-bold text-green-800 tracking-widest">{backupCode}</p>
+                </div>
+                <div className="flex gap-2">
+                  <input type="text" placeholder="別端末の復元コード" maxLength={6}
+                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono uppercase focus:ring-2 focus:ring-green-400 focus:outline-none"
+                    value={restoreCode} onChange={(e) => setRestoreCode(e.target.value.toUpperCase())} />
+                  <button onClick={async () => { if (restoreCode.length >= 4) await restoreFromCloud(restoreCode); }}
+                    disabled={restoreCode.length < 4}
+                    className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white text-sm px-4 py-2 rounded-lg transition"
+                  >復元</button>
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -1109,14 +1372,19 @@ JSONのみ出力してください。` },
                       placeholder="例: ヒルズ I/D 消化ケア"
                       value={newFood.name} onChange={(e) => setNewFood((p) => ({ ...p, name: e.target.value }))} />
                   </label>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" checked={newFood.isComplete}
-                      onChange={(e) => setNewFood((p) => ({ ...p, isComplete: e.target.checked }))}
-                      className="w-4 h-4 accent-amber-600 rounded" />
-                    <span className="text-sm text-gray-700">総合栄養食</span>
-                    <span className="text-[11px] text-gray-400">（チェックなし＝一般食・おやつ）</span>
-                  </label>
-
+                  <button onClick={aiAutoFill} disabled={aiSearching || !newFood.name.trim()}
+                    className="w-full flex flex-col items-center justify-center gap-0.5 border-2 border-dashed border-blue-300 hover:border-blue-400 hover:bg-blue-50 disabled:border-gray-200 disabled:bg-gray-50 disabled:text-gray-400 rounded-lg py-2 cursor-pointer transition text-sm text-blue-600"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span>{aiSearching ? "⏳" : "🤖"}</span>
+                      <span>{aiSearching ? "検索中..." : "AIで自動入力"}</span>
+                    </div>
+                    {!aiSearching && (
+                      <span className="text-[10px] text-gray-400">
+                        {geminiKey ? "自分のAPIキー使用・無制限" : "1日10回まで"}　※100%正確とは限りません
+                      </span>
+                    )}
+                  </button>
                   {/* Image scan button */}
                   <label className={`flex flex-col items-center justify-center gap-1 border-2 border-dashed rounded-lg py-3 cursor-pointer transition ${
                     scanning ? "border-amber-400 bg-amber-50" : "border-gray-300 hover:border-amber-400 hover:bg-amber-50"
@@ -1132,6 +1400,14 @@ JSONのみ出力してください。` },
                     </span>
                     <input type="file" accept="image/*" capture="environment" onChange={scanFoodLabel}
                       disabled={scanning} className="hidden" />
+                  </label>
+
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={newFood.isComplete}
+                      onChange={(e) => setNewFood((p) => ({ ...p, isComplete: e.target.checked }))}
+                      className="w-4 h-4 accent-amber-600 rounded" />
+                    <span className="text-sm text-gray-700">総合栄養食</span>
+                    <span className="text-[11px] text-gray-400">（チェックなし＝一般食・おやつ）</span>
                   </label>
 
                   <p className="text-xs text-gray-500 font-medium">成分 (すべて%)</p>
