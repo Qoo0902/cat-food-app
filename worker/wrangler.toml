@@ -9,3 +9,12 @@ DAILY_LIMIT = "10"
 [[kv_namespaces]]
 binding = "RATE_LIMIT"
 id = "6b1e8cf230fa4ffe91ef39387ba67c01"
+
+# Durable Object for atomic rate-limit counters
+[[durable_objects.bindings]]
+name = "RATE_COUNTER"
+class_name = "RateLimitCounter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RateLimitCounter"]

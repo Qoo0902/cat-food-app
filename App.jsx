@@ -54,8 +54,14 @@ const store = {
   },
 };
 
+/* ─── Pet-type configuration ─── */
+const DER_FACTOR = { cat: 0.84, dog: 1.4 };
+const PET_LABEL = { cat: "猫", dog: "犬" };
+const PET_EMOJI = { cat: "🐱", dog: "🐶" };
+
 /* ─── Calculation helpers ─── */
-const calcDER = (w) => (w > 0 ? 70 * Math.pow(w, 0.75) * 0.84 : 0);
+const calcDER = (w, petType = "cat") =>
+  w > 0 ? 70 * Math.pow(w, 0.75) * (DER_FACTOR[petType] ?? 0.84) : 0;
 
 const calcCarbs = (p, fa, fi, a, m) =>
   Math.max(0, 100 - (p || 0) - (fa || 0) - (fi || 0) - (a || 0) - (m || 0));
@@ -83,9 +89,9 @@ const EMPTY_FOOD = {
 };
 
 /* ─── CSV export ─── */
-function exportCSV(petName, weight, der, waterNeed, items, totals, dm) {
+function exportCSV(petName, weight, der, waterNeed, items, totals, dm, petType = "cat") {
   const rows = [
-    ["猫の食事管理レポート"],
+    [`${PET_LABEL[petType] || "猫"}の食事管理レポート`],
     [],
     ["ペット名", petName],
     ["体重(kg)", weight],
@@ -341,6 +347,9 @@ export default function App() {
 }
 
 function CatFoodCalculator({ license, onLogout }) {
+  /* ─── Pet type (cat / dog) ─── */
+  const [petType, setPetType] = useState("cat");
+
   /* ─── Current editing state ─── */
   const [petName, setPetName] = useState("");
   const [weight, setWeight] = useState("");
@@ -372,11 +381,23 @@ function CatFoodCalculator({ license, onLogout }) {
   const [showApiSettings, setShowApiSettings] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [aiSearching, setAiSearching] = useState(false);
+  const [scanRemaining, setScanRemaining] = useState(null);
+  const [searchRemaining, setSearchRemaining] = useState(null);
 
   /* ─── Cloud backup ─── */
   const [backupCode, setBackupCode] = useState("");
   const [restoreCode, setRestoreCode] = useState("");
   const [backupStatus, setBackupStatus] = useState("");
+
+  /* ─── Daily notes ─── */
+  const todayStr = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  const [dailyNotes, setDailyNotes] = useState({}); // { "YYYY-MM-DD": "本文" }
+  const [noteDate, setNoteDate] = useState(todayStr());
+  const [noteDraft, setNoteDraft] = useState("");
+  const [showNotesHistory, setShowNotesHistory] = useState(false);
 
   /* ─── Load (with auto-restore from cloud) ─── */
   useEffect(() => {
@@ -409,6 +430,10 @@ function CatFoodCalculator({ license, onLogout }) {
               if (d.foodMaster?.length) { master = d.foodMaster; await store.set("food-master", master); }
               if (d.menuItems?.length) setMenuItems(d.menuItems);
               if (d.savedMenus?.length) { setSavedMenus(d.savedMenus); await store.set("saved-menus", d.savedMenus); }
+              if (d.dailyNotes && typeof d.dailyNotes === "object") {
+                setDailyNotes(d.dailyNotes);
+                await store.set("daily-notes", d.dailyNotes);
+              }
               await store.set("pet-info", { petName: d.petName || "", weight: d.weight || "" });
               await store.set("backup-code", code);
             }
@@ -451,6 +476,72 @@ function CatFoodCalculator({ license, onLogout }) {
     })();
   }, []);
 
+  /* ─── Load pet type ─── */
+  useEffect(() => {
+    (async () => {
+      const p = await store.get("pet-type");
+      if (p === "cat" || p === "dog") setPetType(p);
+    })();
+  }, []);
+
+  /* ─── Fetch initial AI rate-limit status ─── */
+  useEffect(() => {
+    (async () => {
+      try {
+        const resp = await fetch(`${WORKER_URL}/rate-status`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data?.scan?.remaining != null) setScanRemaining(data.scan.remaining);
+        if (data?.search?.remaining != null) setSearchRemaining(data.search.remaining);
+      } catch {}
+    })();
+  }, []);
+
+  /* ─── Auto-save pet type ─── */
+  useEffect(() => {
+    if (!loaded) return;
+    store.set("pet-type", petType);
+  }, [petType, loaded]);
+
+  /* ─── Load daily notes ─── */
+  useEffect(() => {
+    (async () => {
+      const n = await store.get("daily-notes");
+      if (n && typeof n === "object") {
+        setDailyNotes(n);
+        const today = todayStr();
+        if (n[today]) setNoteDraft(n[today]);
+      }
+    })();
+  }, []);
+
+  /* ─── Sync note draft when date selection changes ─── */
+  useEffect(() => {
+    setNoteDraft(dailyNotes[noteDate] || "");
+  }, [noteDate]);
+
+  /* ─── Save note for the selected date ─── */
+  const saveNote = useCallback(async () => {
+    const trimmed = noteDraft.trim();
+    const next = { ...dailyNotes };
+    if (trimmed) {
+      next[noteDate] = trimmed;
+    } else {
+      delete next[noteDate];
+    }
+    setDailyNotes(next);
+    await store.set("daily-notes", next);
+  }, [noteDraft, noteDate, dailyNotes]);
+
+  /* ─── Delete note for a specific date ─── */
+  const deleteNote = useCallback(async (date) => {
+    const next = { ...dailyNotes };
+    delete next[date];
+    setDailyNotes(next);
+    await store.set("daily-notes", next);
+    if (date === noteDate) setNoteDraft("");
+  }, [dailyNotes, noteDate]);
+
   /* ─── Auto-save pet info separately ─── */
   useEffect(() => {
     if (!loaded) return;
@@ -477,14 +568,14 @@ function CatFoodCalculator({ license, onLogout }) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             code: backupCode,
-            data: { petName, weight, foodMaster, menuItems, savedMenus },
+            data: { petName, weight, foodMaster, menuItems, savedMenus, dailyNotes },
           }),
         });
         cookie.set("catfood-backup", backupCode);
       } catch {}
     }, 2000); // 2秒デバウンス
     return () => clearTimeout(timer);
-  }, [petName, weight, foodMaster, menuItems, savedMenus, backupCode, loaded]);
+  }, [petName, weight, foodMaster, menuItems, savedMenus, dailyNotes, backupCode, loaded]);
 
   const restoreFromCloud = useCallback(async (code) => {
     try {
@@ -501,6 +592,10 @@ function CatFoodCalculator({ license, onLogout }) {
       if (d.foodMaster?.length) { setFoodMaster(d.foodMaster); await store.set("food-master", d.foodMaster); }
       if (d.menuItems?.length) setMenuItems(d.menuItems);
       if (d.savedMenus?.length) { setSavedMenus(d.savedMenus); await store.set("saved-menus", d.savedMenus); }
+      if (d.dailyNotes && typeof d.dailyNotes === "object") {
+        setDailyNotes(d.dailyNotes);
+        await store.set("daily-notes", d.dailyNotes);
+      }
       setBackupCode(code);
       await store.set("backup-code", code);
       await store.set("pet-info", { petName: d.petName || "", weight: d.weight || "" });
@@ -591,7 +686,7 @@ function CatFoodCalculator({ license, onLogout }) {
 
   /* ─── Derived ─── */
   const w = parseFloat(weight) || 0;
-  const der = calcDER(w);
+  const der = calcDER(w, petType);
   const waterNeed = der;
 
   const enriched = menuItems.map((it) => {
@@ -900,6 +995,7 @@ JSONのみ出力してください。`
         kcalValue: parsed.kcalValue != null ? String(parsed.kcalValue) : p.kcalValue,
         isComplete: parsed.isComplete ?? p.isComplete,
       }));
+      if (result.remaining != null) setSearchRemaining(result.remaining);
       const msg = result.remaining != null
         ? `成分情報を取得しました！（本日残り${result.remaining}回）\n内容を確認してください。`
         : "成分情報を取得しました！内容を確認してください。";
@@ -973,7 +1069,7 @@ JSONのみ出力してください。` },
     if (!resp.ok) {
       throw new Error(data?.error || `サーバーエラー (${resp.status})`);
     }
-    return data?.data || null;
+    return { data: data?.data || null, remaining: data?.remaining };
   };
 
   const scanWithTesseract = async (file) => {
@@ -1008,12 +1104,15 @@ JSONのみ出力してください。` },
     setScanning(true);
     try {
       let parsed = null;
+      let remaining = null;
       if (geminiKey) {
         // 飼い主さんが自分のAPIキーを登録済み → 直接Gemini（無制限）
         parsed = await scanWithGeminiDirect(file);
       } else {
         // 未登録 → Workers経由（先生のAPIキー、1日5回制限）
-        parsed = await scanWithWorker(file);
+        const result = await scanWithWorker(file);
+        parsed = result.data;
+        remaining = result.remaining;
       }
       if (parsed) {
         setNewFood((p) => ({
@@ -1027,7 +1126,11 @@ JSONのみ出力してください。` },
           kcalGrams: String(parsed.kcalGrams ?? ""),
           kcalValue: String(parsed.kcalValue ?? ""),
         }));
-        alert("成分表を読み取りました！内容を確認してください。");
+        if (remaining != null) setScanRemaining(remaining);
+        const msg = remaining != null
+          ? `成分表を読み取りました！（本日残り${remaining}回）\n内容を確認してください。`
+          : "成分表を読み取りました！内容を確認してください。";
+        alert(msg);
       } else {
         alert("成分表を読み取れませんでした。手動で入力してください。");
       }
@@ -1057,10 +1160,32 @@ JSONのみ出力してください。` },
       {/* Header */}
       <header className="bg-gradient-to-r from-amber-600 to-orange-500 text-white px-4 py-3 shadow-md">
         <div className="max-w-4xl mx-auto flex items-center gap-3">
-          <span className="text-3xl">🐱</span>
-          <div>
-            <h1 className="text-lg font-bold leading-tight">くぅのキャットフード研究室</h1>
-            <p className="text-amber-100 text-xs">猫の食事管理アプリ</p>
+          <span className="text-3xl">{PET_EMOJI[petType]}</span>
+          <div className="flex-1">
+            <h1 className="text-lg font-bold leading-tight">
+              {petType === "dog" ? "くぅのドッグフード研究室" : "くぅのキャットフード研究室"}
+            </h1>
+            <p className="text-amber-100 text-xs">{PET_LABEL[petType]}の食事管理アプリ</p>
+          </div>
+          <div className="flex bg-white/20 rounded-full p-0.5 text-xs">
+            <button
+              type="button"
+              onClick={() => setPetType("cat")}
+              className={`px-3 py-1 rounded-full transition ${
+                petType === "cat" ? "bg-white text-amber-700 font-bold" : "text-white"
+              }`}
+            >
+              🐱 猫
+            </button>
+            <button
+              type="button"
+              onClick={() => setPetType("dog")}
+              className={`px-3 py-1 rounded-full transition ${
+                petType === "dog" ? "bg-white text-amber-700 font-bold" : "text-white"
+              }`}
+            >
+              🐶 犬
+            </button>
           </div>
         </div>
       </header>
@@ -1455,6 +1580,85 @@ JSONのみ出力してください。` },
             <span>✨</span> 新しいメニューを作る
           </button>
 
+          {/* ── Daily notes ── */}
+          <section className="bg-white rounded-xl shadow p-4 space-y-3">
+            <h2 className="font-bold text-amber-700 flex items-center gap-1.5">
+              <span>📝</span> 今日のメモ
+            </h2>
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={noteDate}
+                onChange={(e) => setNoteDate(e.target.value)}
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-400 focus:outline-none"
+              />
+              {noteDate !== todayStr() && (
+                <button
+                  type="button"
+                  onClick={() => setNoteDate(todayStr())}
+                  className="text-xs text-amber-700 hover:text-amber-800 underline"
+                >今日に戻す</button>
+              )}
+              {dailyNotes[noteDate] && (
+                <span className="text-[11px] text-emerald-600 ml-auto">保存済み</span>
+              )}
+            </div>
+            <textarea
+              value={noteDraft}
+              onChange={(e) => setNoteDraft(e.target.value)}
+              placeholder="例: うんちの調子が良い / 食欲が普段より少ない / 水をよく飲む日 など"
+              rows={4}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm resize-y focus:ring-2 focus:ring-amber-400 focus:outline-none"
+            />
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setShowNotesHistory(!showNotesHistory)}
+                className="text-xs text-gray-500 hover:text-gray-700 underline"
+              >
+                {showNotesHistory ? "履歴を隠す" : `履歴を見る${Object.keys(dailyNotes).length > 0 ? `（${Object.keys(dailyNotes).length}件）` : ""}`}
+              </button>
+              <button
+                type="button"
+                onClick={saveNote}
+                disabled={(noteDraft || "") === (dailyNotes[noteDate] || "")}
+                className="bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 text-white text-sm px-4 py-2 rounded-lg transition"
+              >
+                💾 このメモを保存
+              </button>
+            </div>
+
+            {showNotesHistory && (
+              <div className="border-t border-gray-100 pt-3 space-y-2 max-h-80 overflow-y-auto">
+                {Object.keys(dailyNotes).length === 0 ? (
+                  <p className="text-xs text-gray-400 text-center py-4">まだメモはありません</p>
+                ) : (
+                  Object.entries(dailyNotes)
+                    .sort(([a], [b]) => (a < b ? 1 : -1))
+                    .map(([date, text]) => (
+                      <div key={date} className="bg-amber-50/40 rounded-lg p-3 text-sm">
+                        <div className="flex items-center justify-between mb-1">
+                          <button
+                            type="button"
+                            onClick={() => setNoteDate(date)}
+                            className="font-bold text-amber-700 hover:underline"
+                          >{date}</button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (confirm(`${date} のメモを削除しますか？`)) deleteNote(date);
+                            }}
+                            className="text-xs text-red-400 hover:text-red-600"
+                          >削除</button>
+                        </div>
+                        <p className="text-gray-700 whitespace-pre-wrap text-xs">{text}</p>
+                      </div>
+                    ))
+                )}
+              </div>
+            )}
+          </section>
+
           {/* Export & Reset & Settings row */}
           <div className="flex justify-between items-center">
             <div className="flex gap-2">
@@ -1473,7 +1677,7 @@ JSONのみ出力してください。` },
                 <input type="file" accept=".csv" onChange={importCSV} className="hidden" />
               </label>
               <button
-                onClick={() => exportCSV(petName, weight, der, waterNeed, menuItems, totals, dm)}
+                onClick={() => exportCSV(petName, weight, der, waterNeed, menuItems, totals, dm, petType)}
                 className="text-sm border border-gray-300 hover:bg-gray-100 px-4 py-1.5 rounded-lg transition"
               >CSV エクスポート</button>
             </div>
@@ -1612,7 +1816,9 @@ JSONのみ出力してください。` },
                     </div>
                     {!aiSearching && (
                       <span className="text-[10px] text-gray-400">
-                        {geminiKey ? "自分のAPIキー使用・無制限" : "1日5回まで"}　※100%正確とは限りません
+                        {geminiKey
+                          ? "自分のAPIキー使用・無制限"
+                          : (searchRemaining != null ? `本日残り${searchRemaining}/5回` : "1日5回まで")}　※100%正確とは限りません
                       </span>
                     )}
                   </button>
@@ -1627,7 +1833,9 @@ JSONのみ出力してください。` },
                       </span>
                     </div>
                     <span className="text-[10px] text-gray-400">
-                      {geminiKey ? "Gemini AI（自分のキー・無制限）" : "Gemini AI（高精度）・1日5回まで"}
+                      {geminiKey
+                        ? "Gemini AI（自分のキー・無制限）"
+                        : (scanRemaining != null ? `Gemini AI（高精度）・本日残り${scanRemaining}/5回` : "Gemini AI（高精度）・1日5回まで")}
                     </span>
                     <input type="file" accept="image/*" capture="environment" onChange={scanFoodLabel}
                       disabled={scanning} className="hidden" />

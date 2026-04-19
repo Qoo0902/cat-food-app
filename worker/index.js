@@ -117,20 +117,45 @@ async function stripeFetch(env, path, params) {
   return { ok: resp.ok, status: resp.status, data: await resp.json() };
 }
 
+/* ───────────────────────────────────────────
+   Atomic rate-limit via Durable Object
+   ─────────────────────────────────────────── */
+async function rateCount(env, key) {
+  try {
+    const id = env.RATE_COUNTER.idFromName("shared");
+    const stub = env.RATE_COUNTER.get(id);
+    const resp = await stub.fetch(
+      `https://do.local/?action=get&key=${encodeURIComponent(key)}`
+    );
+    const data = await resp.json();
+    return data.count || 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function rateIncrIfBelow(env, key, limit) {
+  try {
+    const id = env.RATE_COUNTER.idFromName("shared");
+    const stub = env.RATE_COUNTER.get(id);
+    const resp = await stub.fetch(
+      `https://do.local/?action=incr_if_below&key=${encodeURIComponent(key)}&limit=${limit}`
+    );
+    return await resp.json(); // { exceeded, count }
+  } catch {
+    return { exceeded: false, count: 0 };
+  }
+}
+
 async function checkGlobalLimit(env) {
   const key = globalTodayKey();
-  let count = 0;
-  try {
-    const val = await env.RATE_LIMIT.get(key);
-    count = val ? parseInt(val) : 0;
-  } catch {}
+  const count = await rateCount(env, key);
   return { count, exceeded: count >= GLOBAL_DAILY_LIMIT, key };
 }
 
 async function incrementGlobalCount(env, currentCount, key) {
-  try {
-    await env.RATE_LIMIT.put(key, String(currentCount + 1), { expirationTtl: 86400 });
-  } catch {}
+  // Atomic increment via DO (currentCount param kept for backward compat, unused)
+  await rateIncrIfBelow(env, key, GLOBAL_DAILY_LIMIT);
 }
 
 function jsonResponse(data, status, headers) {
@@ -150,6 +175,76 @@ export default {
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers });
+    }
+
+    // DEBUG: DO counter状態確認用 (secretトークンが必要)
+    if (path === "/__debug-rate") {
+      const token = url.searchParams.get("t");
+      if (token !== "rinchan-debug-2026") {
+        return new Response("forbidden", { status: 403 });
+      }
+      const key = url.searchParams.get("key") || "";
+      if (!key) return new Response("key required", { status: 400 });
+      const count = await rateCount(env, key);
+      return new Response(JSON.stringify({ key, count }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (path === "/__debug-incr") {
+      const token = url.searchParams.get("t");
+      if (token !== "rinchan-debug-2026") {
+        return new Response("forbidden", { status: 403 });
+      }
+      const key = url.searchParams.get("key") || "";
+      const limit = parseInt(url.searchParams.get("limit") || "5");
+      if (!key) return new Response("key required", { status: 400 });
+      const result = await rateIncrIfBelow(env, key, limit);
+      return new Response(JSON.stringify(result), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (path === "/__debug-list") {
+      const token = url.searchParams.get("t");
+      if (token !== "rinchan-debug-2026") {
+        return new Response("forbidden", { status: 403 });
+      }
+      const prefix = url.searchParams.get("prefix") || "";
+      try {
+        const id = env.RATE_COUNTER.idFromName("shared");
+        const stub = env.RATE_COUNTER.get(id);
+        const resp = await stub.fetch(
+          `https://do.local/?action=list&prefix=${encodeURIComponent(prefix)}`
+        );
+        return new Response(await resp.text(), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: String(e) }), { status: 500 });
+      }
+    }
+
+    // ─── Rate-limit status (read-only, IP-based, CORS open) ───
+    // GET /rate-status → { scan: { remaining, limit }, search: { remaining, limit } }
+    // 読み取り専用・副作用なし・IPベースなので全Origin許可（CORSチェック前に置く）
+    if (path === "/rate-status" && request.method === "GET") {
+      const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+      const SCAN_LIMIT = 5;
+      const SEARCH_LIMIT = 5;
+      const scanCount = await rateCount(env, todayKey(ip, "scan"));
+      const searchCount = await rateCount(env, todayKey(ip, "search"));
+      return new Response(JSON.stringify({
+        scan: { remaining: Math.max(0, SCAN_LIMIT - scanCount), limit: SCAN_LIMIT },
+        search: { remaining: Math.max(0, SEARCH_LIMIT - searchCount), limit: SEARCH_LIMIT },
+      }), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
     }
 
     // CORS check
@@ -372,19 +467,16 @@ export default {
       const limit = 5; // 撮影は1日5回/IP
       const rateKey = todayKey(ip, "scan");
 
-      // グローバル上限（無料枠超過防止の安全弁）
-      const g = await checkGlobalLimit(env);
-      if (g.exceeded) {
+      // グローバル上限（無料枠超過防止の安全弁）— 事前チェック
+      const globalKey = globalTodayKey();
+      const globalCount = await rateCount(env, globalKey);
+      if (globalCount >= GLOBAL_DAILY_LIMIT) {
         return jsonResponse({ error: "本日のAI機能は全体の上限に達しました。明日またお試しください。" }, 429, headers);
       }
 
-      let count = 0;
-      try {
-        const val = await env.RATE_LIMIT.get(rateKey);
-        count = val ? parseInt(val) : 0;
-      } catch {}
-
-      if (count >= limit) {
+      // 事前チェック（Geminiを呼ぶ前に早期429するため）
+      const preCount = await rateCount(env, rateKey);
+      if (preCount >= limit) {
         return jsonResponse({ error: `成分表撮影は1日${limit}回の上限に達しました。明日またお試しください。` }, 429, headers);
       }
 
@@ -451,13 +543,15 @@ export default {
           return jsonResponse({ error: "キャットフードの成分表が検出できませんでした" }, 422, headers);
         }
 
-        try {
-          await env.RATE_LIMIT.put(rateKey, String(count + 1), { expirationTtl: 86400 });
-        } catch {}
-        // グローバルカウントも加算
-        await incrementGlobalCount(env, g.count, g.key);
+        // 原子的にレート制限カウンタをインクリメント（競合を正しく検知）
+        const scanIncr = await rateIncrIfBelow(env, rateKey, limit);
+        if (scanIncr.exceeded) {
+          return jsonResponse({ error: `成分表撮影は1日${limit}回の上限に達しました。明日またお試しください。` }, 429, headers);
+        }
+        // グローバルカウントも原子的に加算
+        await rateIncrIfBelow(env, globalKey, GLOBAL_DAILY_LIMIT);
 
-        return jsonResponse({ data: parsed, remaining: limit - count - 1 }, 200, headers);
+        return jsonResponse({ data: parsed, remaining: limit - scanIncr.count }, 200, headers);
       } catch (err) {
         return jsonResponse({ error: "画像解析中にエラーが発生しました" }, 500, headers);
       }
@@ -472,20 +566,17 @@ export default {
     const ip = request.headers.get("CF-Connecting-IP") || "unknown";
     const limit = 5; // AI自動入力は1日5回/IP
     const rateKey = todayKey(ip, "search");
+    const globalKey = globalTodayKey();
 
-    // グローバル上限（無料枠超過防止の安全弁）
-    const g2 = await checkGlobalLimit(env);
-    if (g2.exceeded) {
+    // グローバル上限（無料枠超過防止の安全弁）— 事前チェック
+    const globalCount = await rateCount(env, globalKey);
+    if (globalCount >= GLOBAL_DAILY_LIMIT) {
       return jsonResponse({ error: "本日のAI機能は全体の上限に達しました。明日またお試しください。" }, 429, headers);
     }
 
-    let count = 0;
-    try {
-      const val = await env.RATE_LIMIT.get(rateKey);
-      count = val ? parseInt(val) : 0;
-    } catch {}
-
-    if (count >= limit) {
+    // 事前チェック（Geminiを呼ぶ前に早期429するため）
+    const preCount = await rateCount(env, rateKey);
+    if (preCount >= limit) {
       return jsonResponse({ error: `AI自動入力は1日${limit}回の上限に達しました。明日またお試しください。` }, 429, headers);
     }
 
@@ -533,16 +624,102 @@ export default {
         return jsonResponse({ error: "成分情報を取得できませんでした" }, 404, headers);
       }
 
-      try {
-        await env.RATE_LIMIT.put(rateKey, String(count + 1), { expirationTtl: 86400 });
-      } catch {}
-      // グローバルカウントも加算
-      await incrementGlobalCount(env, g2.count, g2.key);
+      // 原子的にレート制限カウンタをインクリメント（競合を正しく検知）
+      const searchIncr = await rateIncrIfBelow(env, rateKey, limit);
+      if (searchIncr.exceeded) {
+        return jsonResponse({ error: `AI自動入力は1日${limit}回の上限に達しました。明日またお試しください。` }, 429, headers);
+      }
+      // グローバルカウントも原子的に加算
+      await rateIncrIfBelow(env, globalKey, GLOBAL_DAILY_LIMIT);
 
       const parsed = JSON.parse(jsonMatch[0]);
-      return jsonResponse({ data: parsed, remaining: limit - count - 1 }, 200, headers);
+      return jsonResponse({ data: parsed, remaining: limit - searchIncr.count }, 200, headers);
     } catch (err) {
       return jsonResponse({ error: "AI検索中にエラーが発生しました" }, 500, headers);
     }
   },
 };
+
+/* ═══════════════════════════════════════════
+   Durable Object: atomic rate-limit counter
+   ─ Single-threaded execution guarantees atomicity.
+   ─ All counters share one DO instance (idFromName("shared")).
+   ─ Daily keys (rate:kind:ip:YYYY-MM-DD) never clash across days.
+   ═══════════════════════════════════════════ */
+export class RateLimitCounter {
+  constructor(state) {
+    this.state = state;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const action = url.searchParams.get("action");
+    const key = url.searchParams.get("key") || "";
+
+    if (action === "get" || action === "incr_if_below") {
+      if (!key) {
+        return new Response(JSON.stringify({ error: "key required" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        });
+      }
+    }
+
+    if (action === "get") {
+      const count = (await this.state.storage.get(key)) || 0;
+      return new Response(JSON.stringify({ count }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    if (action === "incr_if_below") {
+      const limit = parseInt(url.searchParams.get("limit") || "5");
+      const current = (await this.state.storage.get(key)) || 0;
+      if (current >= limit) {
+        return new Response(JSON.stringify({ exceeded: true, count: current }), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const next = current + 1;
+      await this.state.storage.put(key, next);
+      return new Response(JSON.stringify({ exceeded: false, count: next }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    if (action === "list") {
+      const prefix = url.searchParams.get("prefix") || "";
+      const all = await this.state.storage.list();
+      const result = [];
+      for (const [k, v] of all) {
+        if (!prefix || k.startsWith(prefix)) result.push({ key: k, value: v });
+      }
+      return new Response(JSON.stringify({ items: result }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    if (action === "cleanup") {
+      // Optional manual cleanup: remove all keys older than 2 days
+      const today = new Date().toISOString().slice(0, 10);
+      const all = await this.state.storage.list();
+      let removed = 0;
+      for (const k of all.keys()) {
+        // Keys end with :YYYY-MM-DD, remove if older than today-1
+        const m = k.match(/:(\d{4}-\d{2}-\d{2})$/);
+        if (m && m[1] < today) {
+          await this.state.storage.delete(k);
+          removed++;
+        }
+      }
+      return new Response(JSON.stringify({ removed }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    return new Response(JSON.stringify({ error: "unknown action" }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+  }
+}
