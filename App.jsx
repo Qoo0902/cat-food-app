@@ -649,6 +649,7 @@ function CatFoodCalculator({ license, onLogout }) {
     );
     setSavedMenus(updated);
     await store.set("saved-menus", updated);
+    alert("上書き保存OK!");
   }, [loadedMenuId, savedMenus, petName, weight, menuItems]);
 
   /* ─── Delete a saved menu ─── */
