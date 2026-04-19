@@ -177,55 +177,6 @@ export default {
       return new Response(null, { status: 204, headers });
     }
 
-    // DEBUG: DO counter状態確認用 (secretトークンが必要)
-    if (path === "/__debug-rate") {
-      const token = url.searchParams.get("t");
-      if (token !== "rinchan-debug-2026") {
-        return new Response("forbidden", { status: 403 });
-      }
-      const key = url.searchParams.get("key") || "";
-      if (!key) return new Response("key required", { status: 400 });
-      const count = await rateCount(env, key);
-      return new Response(JSON.stringify({ key, count }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    if (path === "/__debug-incr") {
-      const token = url.searchParams.get("t");
-      if (token !== "rinchan-debug-2026") {
-        return new Response("forbidden", { status: 403 });
-      }
-      const key = url.searchParams.get("key") || "";
-      const limit = parseInt(url.searchParams.get("limit") || "5");
-      if (!key) return new Response("key required", { status: 400 });
-      const result = await rateIncrIfBelow(env, key, limit);
-      return new Response(JSON.stringify(result), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    if (path === "/__debug-list") {
-      const token = url.searchParams.get("t");
-      if (token !== "rinchan-debug-2026") {
-        return new Response("forbidden", { status: 403 });
-      }
-      const prefix = url.searchParams.get("prefix") || "";
-      try {
-        const id = env.RATE_COUNTER.idFromName("shared");
-        const stub = env.RATE_COUNTER.get(id);
-        const resp = await stub.fetch(
-          `https://do.local/?action=list&prefix=${encodeURIComponent(prefix)}`
-        );
-        return new Response(await resp.text(), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      } catch (e) {
-        return new Response(JSON.stringify({ error: String(e) }), { status: 500 });
-      }
-    }
-
     // ─── Rate-limit status (read-only, IP-based, CORS open) ───
     // GET /rate-status → { scan: { remaining, limit }, search: { remaining, limit } }
     // 読み取り専用・副作用なし・IPベースなので全Origin許可（CORSチェック前に置く）

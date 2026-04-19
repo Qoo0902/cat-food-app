@@ -1818,7 +1818,7 @@ JSONのみ出力してください。` },
                       <span className="text-[10px] text-gray-400">
                         {geminiKey
                           ? "自分のAPIキー使用・無制限"
-                          : (searchRemaining != null ? `本日残り${searchRemaining}/5回` : "1日5回まで")}　※100%正確とは限りません
+                          : (searchRemaining != null ? `残り${searchRemaining}回（1日5回まで）` : "1日5回まで")}　※100%正確とは限りません
                       </span>
                     )}
                   </button>
@@ -1835,7 +1835,7 @@ JSONのみ出力してください。` },
                     <span className="text-[10px] text-gray-400">
                       {geminiKey
                         ? "Gemini AI（自分のキー・無制限）"
-                        : (scanRemaining != null ? `Gemini AI（高精度）・本日残り${scanRemaining}/5回` : "Gemini AI（高精度）・1日5回まで")}
+                        : (scanRemaining != null ? `Gemini AI（高精度）・残り${scanRemaining}回（1日5回まで）` : "Gemini AI（高精度）・1日5回まで")}
                     </span>
                     <input type="file" accept="image/*" capture="environment" onChange={scanFoodLabel}
                       disabled={scanning} className="hidden" />
