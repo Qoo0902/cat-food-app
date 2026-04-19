@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import Tesseract from "tesseract.js";
 
 /* ─── Cookie helpers (survives localStorage clear) ─── */
@@ -356,11 +356,15 @@ function CatFoodCalculator({ license, onLogout }) {
   const [foodMaster, setFoodMaster] = useState([]);
   const [menuItems, setMenuItems] = useState([]);
 
-  /* ─── Saved menus ─── */
+  /* ─── Saved menus (mixes templates and dated menus) ─── */
   const [savedMenus, setSavedMenus] = useState([]);
   const [showSaveForm, setShowSaveForm] = useState(false);
+  const [saveType, setSaveType] = useState("daily"); // "template" or "daily"
   const [saveMenuName, setSaveMenuName] = useState("");
-  const [loadedMenuId, setLoadedMenuId] = useState(null); // currently loaded menu ID
+  const [saveDate, setSaveDate] = useState(""); // YYYY-MM-DD
+  const [savePet, setSavePet] = useState(""); // pet name for dated menu
+  const [saveMemo, setSaveMemo] = useState(""); // memo for dated menu
+  const [loadedMenuId, setLoadedMenuId] = useState(null);
 
   /* ─── Dialogs ─── */
   const [showAdd, setShowAdd] = useState(false);
@@ -613,8 +617,18 @@ function CatFoodCalculator({ license, onLogout }) {
     await store.set("food-master", m);
   }, []);
 
-  /* ─── Save current menu with a name ─── */
-  const saveCurrentMenu = useCallback(async () => {
+  /* ─── Pet name candidates for autocomplete (from past menus) ─── */
+  const petNameCandidates = useMemo(() => {
+    const set = new Set();
+    savedMenus.forEach((m) => {
+      if (m.petName) set.add(m.petName);
+    });
+    if (petName) set.add(petName);
+    return [...set];
+  }, [savedMenus, petName]);
+
+  /* ─── Save as template (named) ─── */
+  const saveAsTemplate = useCallback(async () => {
     if (!saveMenuName.trim()) return;
     const newSaved = {
       id: uid(),
@@ -629,7 +643,47 @@ function CatFoodCalculator({ license, onLogout }) {
     await store.set("saved-menus", updated);
     setSaveMenuName("");
     setShowSaveForm(false);
+    alert("テンプレートとして保存しました");
   }, [saveMenuName, petName, weight, menuItems, savedMenus]);
+
+  /* ─── Save as dated menu (with pet+memo) ─── */
+  const saveAsDailyMenu = useCallback(async () => {
+    if (!saveDate) { alert("日付を選んでください"); return; }
+    const pn = (savePet || petName).trim();
+    if (!pn) { alert("ペット名を入れてください"); return; }
+    // Replace existing same-date+same-pet entry if exists
+    const filtered = savedMenus.filter(
+      (m) => !(m.date === saveDate && (m.petName || "") === pn)
+    );
+    const newSaved = {
+      id: uid(),
+      name: `${pn} ${saveDate}`,
+      date: saveDate,
+      petName: pn,
+      weight: parseFloat(weight) || 0,
+      items: [...menuItems],
+      note: saveMemo || "",
+      savedAt: new Date().toISOString(),
+    };
+    const updated = [...filtered, newSaved];
+    setSavedMenus(updated);
+    await store.set("saved-menus", updated);
+    setSaveMenuName("");
+    setSaveDate("");
+    setSavePet("");
+    setSaveMemo("");
+    setShowSaveForm(false);
+    alert("日付メニューとして保存しました");
+  }, [saveDate, savePet, petName, weight, menuItems, saveMemo, savedMenus]);
+
+  /* ─── Combined save (called from form) ─── */
+  const saveCurrentMenu = useCallback(async () => {
+    if (saveType === "template") {
+      await saveAsTemplate();
+    } else {
+      await saveAsDailyMenu();
+    }
+  }, [saveType, saveAsTemplate, saveAsDailyMenu]);
 
   /* ─── Load a saved menu ─── */
   const loadMenu = useCallback((menu) => {
@@ -1482,83 +1536,198 @@ JSONのみ出力してください。` },
         )}
 
         {/* ── Saved Menus ── */}
-        {savedMenus.length > 0 && (
-          <section className="bg-white rounded-xl shadow p-4 space-y-3">
-            <h2 className="font-bold text-amber-700 flex items-center gap-1.5">
-              <span>📋</span> 保存済みメニュー
-            </h2>
-            <ul className="space-y-2">
-              {savedMenus.map((m, idx) => (
-                <li key={m.id} className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-3">
-                  <div className="flex flex-col gap-0.5">
-                    <button
-                      onClick={() => moveSavedMenu(idx, -1)}
-                      disabled={idx === 0}
-                      className="text-gray-400 hover:text-amber-600 disabled:opacity-20 text-sm leading-none p-0.5 transition"
-                      aria-label="上に移動"
-                    >▲</button>
-                    <button
-                      onClick={() => moveSavedMenu(idx, 1)}
-                      disabled={idx === savedMenus.length - 1}
-                      className="text-gray-400 hover:text-amber-600 disabled:opacity-20 text-sm leading-none p-0.5 transition"
-                      aria-label="下に移動"
-                    >▼</button>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium truncate">{m.name}</p>
-                    <p className="text-xs text-gray-400">
-                      {m.petName || "未設定"} / {m.items?.length || 0}商品
-                      {m.savedAt && ` / ${new Date(m.savedAt).toLocaleDateString("ja-JP")}`}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button
-                      onClick={() => loadMenu(m)}
-                      className="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1.5 rounded-lg transition"
-                    >読み込む</button>
-                    <button
-                      onClick={() => deleteSavedMenu(m.id)}
-                      className="text-red-400 hover:text-red-600 text-xs px-2 py-1.5"
-                    >削除</button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+        {(() => {
+          const dailyList = savedMenus
+            .filter((m) => m.date)
+            .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+          const templateList = savedMenus.filter((m) => !m.date);
+          return (
+            <>
+              {dailyList.length > 0 && (
+                <section className="bg-white rounded-xl shadow p-4 space-y-3">
+                  <h2 className="font-bold text-amber-700 flex items-center gap-1.5">
+                    <span>📅</span> 日付メニュー履歴
+                  </h2>
+                  <ul className="space-y-2">
+                    {dailyList.map((m) => {
+                      const d = new Date(m.date + "T00:00:00");
+                      const dateLabel = `${d.getMonth() + 1}月${d.getDate()}日`;
+                      return (
+                        <li key={m.id} className="bg-gray-50 rounded-lg px-3 py-3 space-y-1.5">
+                          <div className="flex items-center gap-2">
+                            <span className="bg-amber-100 text-amber-800 text-xs px-2 py-0.5 rounded font-medium">{dateLabel}</span>
+                            <span className="font-medium truncate">{m.petName || "未設定"}</span>
+                            <span className="text-xs text-gray-400 ml-auto shrink-0">{m.items?.length || 0}商品</span>
+                          </div>
+                          {m.note && (
+                            <p className="text-xs text-gray-600 bg-amber-50 px-2 py-1 rounded whitespace-pre-wrap">📝 {m.note}</p>
+                          )}
+                          <div className="flex items-center gap-2 justify-end">
+                            <button
+                              onClick={() => loadMenu(m)}
+                              className="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1.5 rounded-lg transition"
+                            >読み込む</button>
+                            <button
+                              onClick={() => deleteSavedMenu(m.id)}
+                              className="text-red-400 hover:text-red-600 text-xs px-2 py-1.5"
+                            >削除</button>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </section>
+              )}
+              {templateList.length > 0 && (
+                <section className="bg-white rounded-xl shadow p-4 space-y-3">
+                  <h2 className="font-bold text-amber-700 flex items-center gap-1.5">
+                    <span>📋</span> テンプレートメニュー
+                  </h2>
+                  <ul className="space-y-2">
+                    {templateList.map((m, idx) => (
+                      <li key={m.id} className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-3">
+                        <div className="flex flex-col gap-0.5">
+                          <button
+                            onClick={() => moveSavedMenu(savedMenus.indexOf(m), -1)}
+                            disabled={idx === 0}
+                            className="text-gray-400 hover:text-amber-600 disabled:opacity-20 text-sm leading-none p-0.5 transition"
+                            aria-label="上に移動"
+                          >▲</button>
+                          <button
+                            onClick={() => moveSavedMenu(savedMenus.indexOf(m), 1)}
+                            disabled={idx === templateList.length - 1}
+                            className="text-gray-400 hover:text-amber-600 disabled:opacity-20 text-sm leading-none p-0.5 transition"
+                            aria-label="下に移動"
+                          >▼</button>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium truncate">{m.name}</p>
+                          <p className="text-xs text-gray-400">
+                            {m.petName || "未設定"} / {m.items?.length || 0}商品
+                            {m.savedAt && ` / ${new Date(m.savedAt).toLocaleDateString("ja-JP")}`}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            onClick={() => loadMenu(m)}
+                            className="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1.5 rounded-lg transition"
+                          >読み込む</button>
+                          <button
+                            onClick={() => deleteSavedMenu(m.id)}
+                            className="text-red-400 hover:text-red-600 text-xs px-2 py-1.5"
+                          >削除</button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+            </>
+          );
+        })()}
 
         {/* ── Save / Export / Reset ── */}
         <div className="space-y-3 pb-6">
           {/* Save menu button / form */}
           {!showSaveForm ? (
             <button
-              onClick={() => setShowSaveForm(true)}
+              onClick={() => {
+                setShowSaveForm(true);
+                if (!saveDate) setSaveDate(todayStr());
+                if (!savePet) setSavePet(petName || "");
+              }}
               className="w-full bg-white border-2 border-amber-400 text-amber-700 hover:bg-amber-50 py-3 rounded-xl font-medium transition flex items-center justify-center gap-2"
             >
               <span>💾</span> このメニューを登録する
             </button>
           ) : (
             <div className="bg-white border-2 border-amber-400 rounded-xl p-4 space-y-3">
-              <p className="font-medium text-amber-700 text-sm">メニュー名を入力してください</p>
-              <div className="flex gap-2">
-                <input
-                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-400 focus:outline-none"
-                  placeholder="例: 療法食メニュー"
-                  value={saveMenuName}
-                  onChange={(e) => setSaveMenuName(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && saveCurrentMenu()}
-                  autoFocus
-                />
+              {/* Type selector */}
+              <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
                 <button
-                  onClick={saveCurrentMenu}
-                  disabled={!saveMenuName.trim()}
-                  className="bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 text-white px-4 py-2 rounded-lg font-medium transition"
-                >保存</button>
+                  type="button"
+                  onClick={() => setSaveType("daily")}
+                  className={`flex-1 text-sm py-1.5 rounded-md transition ${saveType === "daily" ? "bg-white shadow font-medium" : "text-gray-500"}`}
+                >📅 ○月○日のメニュー</button>
                 <button
-                  onClick={() => { setShowSaveForm(false); setSaveMenuName(""); }}
-                  className="text-gray-400 hover:text-gray-600 px-2"
-                >×</button>
+                  type="button"
+                  onClick={() => setSaveType("template")}
+                  className={`flex-1 text-sm py-1.5 rounded-md transition ${saveType === "template" ? "bg-white shadow font-medium" : "text-gray-500"}`}
+                >📋 テンプレート</button>
               </div>
+
+              {saveType === "daily" ? (
+                <div className="space-y-2">
+                  <label className="block">
+                    <span className="text-xs text-gray-500">日付</span>
+                    <input
+                      type="date"
+                      value={saveDate}
+                      onChange={(e) => setSaveDate(e.target.value)}
+                      className="mt-0.5 w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-400 focus:outline-none"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs text-gray-500">ペット名 {petNameCandidates.length > 0 && <span className="text-gray-400">（過去入力から選択可）</span>}</span>
+                    <input
+                      type="text"
+                      list="pet-name-options"
+                      value={savePet}
+                      onChange={(e) => setSavePet(e.target.value)}
+                      placeholder="例: ぽち"
+                      className="mt-0.5 w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-400 focus:outline-none"
+                    />
+                    <datalist id="pet-name-options">
+                      {petNameCandidates.map((p) => <option key={p} value={p} />)}
+                    </datalist>
+                  </label>
+                  <label className="block">
+                    <span className="text-xs text-gray-500">メモ（その日の体調・食欲など）</span>
+                    <textarea
+                      value={saveMemo}
+                      onChange={(e) => setSaveMemo(e.target.value)}
+                      placeholder="例: 朝は食欲なし、午後完食"
+                      rows={2}
+                      className="mt-0.5 w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-400 focus:outline-none"
+                    />
+                  </label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={saveCurrentMenu}
+                      disabled={!saveDate || !(savePet || petName).trim()}
+                      className="flex-1 bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 text-white px-4 py-2 rounded-lg font-medium transition"
+                    >この日のメニューとして保存</button>
+                    <button
+                      onClick={() => { setShowSaveForm(false); setSaveDate(""); setSavePet(""); setSaveMemo(""); }}
+                      className="text-gray-400 hover:text-gray-600 px-2"
+                    >×</button>
+                  </div>
+                  <p className="text-[11px] text-gray-400">同じ日付・同じペット名で保存済みがあれば自動上書き</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="font-medium text-amber-700 text-sm">テンプレート名を入力してください</p>
+                  <div className="flex gap-2">
+                    <input
+                      className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-400 focus:outline-none"
+                      placeholder="例: 療法食メニュー"
+                      value={saveMenuName}
+                      onChange={(e) => setSaveMenuName(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && saveCurrentMenu()}
+                      autoFocus
+                    />
+                    <button
+                      onClick={saveCurrentMenu}
+                      disabled={!saveMenuName.trim()}
+                      className="bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 text-white px-4 py-2 rounded-lg font-medium transition"
+                    >保存</button>
+                    <button
+                      onClick={() => { setShowSaveForm(false); setSaveMenuName(""); }}
+                      className="text-gray-400 hover:text-gray-600 px-2"
+                    >×</button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
