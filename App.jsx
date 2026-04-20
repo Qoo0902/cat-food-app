@@ -59,6 +59,33 @@ const DER_FACTOR = { cat: 0.84, dog: 1.4 };
 const PET_LABEL = { cat: "猫", dog: "犬" };
 const PET_EMOJI = { cat: "🐱", dog: "🐶" };
 
+/* ─── App changelog (newest first) ─── */
+const CURRENT_VERSION = "1.6.0";
+const CHANGELOG = [
+  {
+    version: "1.6.0",
+    date: "2026-04-20",
+    changes: [
+      "テンプレート機能を廃止し、日付メニュー履歴に一本化（既存データは自動移行）",
+      "日付メニュー履歴にカレンダー表示を追加（Googleカレンダー風）",
+      "履歴カードから📝メモをインライン編集できるように",
+      "「読み込む」を「表示する」にリネーム＋トースト通知",
+      "📊 期間平均カロリー機能を追加（入力のない日は自動除外＋備考表示）",
+      "🔔 アプリ更新履歴ボタンを追加",
+    ],
+  },
+  {
+    version: "1.5.0",
+    date: "2026-04-19",
+    changes: [
+      "日付メニュー機能＋多頭飼い対応（ペット名autocomplete）",
+      "AI自動入力で食材名（ささみ・鶏むね等）の成分表に対応",
+      "成分表撮影の「本日残り○回」動的表示",
+      "上書き保存時に「上書き保存OK!」アラート表示",
+    ],
+  },
+];
+
 /* ─── Calculation helpers ─── */
 const calcDER = (w, petType = "cat") =>
   w > 0 ? 70 * Math.pow(w, 0.75) * (DER_FACTOR[petType] ?? 0.84) : 0;
@@ -87,6 +114,49 @@ const EMPTY_FOOD = {
   kcalValue: "",
   isComplete: false,
 };
+
+/* ─── One-time migration: convert legacy templates (no date) to dated menus ─── */
+function migrateTemplatesToDated(menus) {
+  if (!Array.isArray(menus)) return menus;
+  const hasLegacyTemplate = menus.some((m) => !m.date);
+  if (!hasLegacyTemplate) return menus;
+  const todayStr = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  })();
+  const converted = menus.map((m) => {
+    if (m.date) return m;
+    let date = todayStr;
+    if (m.savedAt) {
+      const sa = new Date(m.savedAt);
+      if (!isNaN(sa.getTime())) {
+        date = `${sa.getFullYear()}-${String(sa.getMonth() + 1).padStart(2, "0")}-${String(sa.getDate()).padStart(2, "0")}`;
+      }
+    }
+    const parts = [];
+    if (m.note && m.note.trim()) parts.push(m.note.trim());
+    if (m.name && m.name.trim()) parts.push(m.name.trim());
+    const mergedNote = parts.join(" / ");
+    const { name, ...rest } = m;
+    return { ...rest, date, note: mergedNote };
+  });
+  const sig = (m) => {
+    const items = (m.items || [])
+      .map((it) => `${it.id || it.name}:${it.grams || 0}`)
+      .sort()
+      .join(",");
+    return `${m.date}|${(m.petName || "").trim()}|${(m.note || "").trim()}|${items}`;
+  };
+  const seen = new Set();
+  const deduped = [];
+  for (const m of converted) {
+    const k = sig(m);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    deduped.push(m);
+  }
+  return deduped;
+}
 
 /* ─── CSV export ─── */
 function exportCSV(petName, weight, der, waterNeed, items, totals, dm, petType = "cat") {
@@ -356,15 +426,30 @@ function CatFoodCalculator({ license, onLogout }) {
   const [foodMaster, setFoodMaster] = useState([]);
   const [menuItems, setMenuItems] = useState([]);
 
-  /* ─── Saved menus (mixes templates and dated menus) ─── */
+  /* ─── Saved menus (all are dated) ─── */
   const [savedMenus, setSavedMenus] = useState([]);
   const [showSaveForm, setShowSaveForm] = useState(false);
-  const [saveType, setSaveType] = useState("daily"); // "template" or "daily"
-  const [saveMenuName, setSaveMenuName] = useState("");
   const [saveDate, setSaveDate] = useState(""); // YYYY-MM-DD
   const [savePet, setSavePet] = useState(""); // pet name for dated menu
   const [saveMemo, setSaveMemo] = useState(""); // memo for dated menu
   const [loadedMenuId, setLoadedMenuId] = useState(null);
+  const [editingMemoId, setEditingMemoId] = useState(null); // id of dated menu whose memo is being edited
+  const [editingMemoDraft, setEditingMemoDraft] = useState("");
+  const [historyView, setHistoryView] = useState("list"); // "list" | "calendar"
+  const [calendarMonth, setCalendarMonth] = useState(() => {
+    const d = new Date();
+    return { year: d.getFullYear(), month: d.getMonth() };
+  });
+  const [calendarSelectedDate, setCalendarSelectedDate] = useState(null);
+  const [showStats, setShowStats] = useState(false);
+  const [statFrom, setStatFrom] = useState("");
+  const [statTo, setStatTo] = useState("");
+  const [statPet, setStatPet] = useState("__all__");
+  const [showChangelog, setShowChangelog] = useState(false);
+  const [lastReadVersion, setLastReadVersion] = useState(() => {
+    if (typeof localStorage === "undefined") return "";
+    return localStorage.getItem("last-read-version") || "";
+  });
 
   /* ─── Dialogs ─── */
   const [showAdd, setShowAdd] = useState(false);
@@ -455,7 +540,13 @@ function CatFoodCalculator({ license, onLogout }) {
           setMenuItems(current.items || []);
         }
         const saved = await store.get("saved-menus");
-        if (saved) setSavedMenus(saved);
+        if (saved) {
+          const migrated = migrateTemplatesToDated(saved);
+          if (migrated !== saved) {
+            await store.set("saved-menus", migrated);
+          }
+          setSavedMenus(migrated);
+        }
       }
 
       // Ensure water is in master
@@ -627,25 +718,6 @@ function CatFoodCalculator({ license, onLogout }) {
     return [...set];
   }, [savedMenus, petName]);
 
-  /* ─── Save as template (named) ─── */
-  const saveAsTemplate = useCallback(async () => {
-    if (!saveMenuName.trim()) return;
-    const newSaved = {
-      id: uid(),
-      name: saveMenuName.trim(),
-      petName,
-      weight: parseFloat(weight) || 0,
-      items: [...menuItems],
-      savedAt: new Date().toISOString(),
-    };
-    const updated = [...savedMenus, newSaved];
-    setSavedMenus(updated);
-    await store.set("saved-menus", updated);
-    setSaveMenuName("");
-    setShowSaveForm(false);
-    alert("テンプレートとして保存しました");
-  }, [saveMenuName, petName, weight, menuItems, savedMenus]);
-
   /* ─── Save as dated menu (with pet+memo) ─── */
   const saveAsDailyMenu = useCallback(async () => {
     if (!saveDate) { alert("日付を選んでください"); return; }
@@ -668,7 +740,6 @@ function CatFoodCalculator({ license, onLogout }) {
     const updated = [...filtered, newSaved];
     setSavedMenus(updated);
     await store.set("saved-menus", updated);
-    setSaveMenuName("");
     setSaveDate("");
     setSavePet("");
     setSaveMemo("");
@@ -676,14 +747,8 @@ function CatFoodCalculator({ license, onLogout }) {
     alert("日付メニューとして保存しました");
   }, [saveDate, savePet, petName, weight, menuItems, saveMemo, savedMenus]);
 
-  /* ─── Combined save (called from form) ─── */
-  const saveCurrentMenu = useCallback(async () => {
-    if (saveType === "template") {
-      await saveAsTemplate();
-    } else {
-      await saveAsDailyMenu();
-    }
-  }, [saveType, saveAsTemplate, saveAsDailyMenu]);
+  /* ─── Save (called from form) ─── */
+  const saveCurrentMenu = saveAsDailyMenu;
 
   /* ─── Load a saved menu ─── */
   const loadMenu = useCallback((menu) => {
@@ -691,6 +756,8 @@ function CatFoodCalculator({ license, onLogout }) {
     setWeight(menu.weight ? String(menu.weight) : "");
     setMenuItems(menu.items || []);
     setLoadedMenuId(menu.id);
+    setShowAdd(false);
+    alert("表示しました");
   }, []);
 
   /* ─── Overwrite a saved menu ─── */
@@ -713,12 +780,11 @@ function CatFoodCalculator({ license, onLogout }) {
     await store.set("saved-menus", updated);
   }, [savedMenus]);
 
-  /* ─── Reorder saved menus ─── */
-  const moveSavedMenu = useCallback(async (index, direction) => {
-    const target = index + direction;
-    if (target < 0 || target >= savedMenus.length) return;
-    const updated = [...savedMenus];
-    [updated[index], updated[target]] = [updated[target], updated[index]];
+  /* ─── Update memo on a saved dated menu ─── */
+  const updateMenuNote = useCallback(async (menuId, note) => {
+    const updated = savedMenus.map((m) =>
+      m.id === menuId ? { ...m, note: note.trim() } : m
+    );
     setSavedMenus(updated);
     await store.set("saved-menus", updated);
   }, [savedMenus]);
@@ -1222,6 +1288,23 @@ JSONのみ出力してください。` },
             </h1>
             <p className="text-amber-100 text-xs">{PET_LABEL[petType]}の食事管理アプリ</p>
           </div>
+          <button
+            type="button"
+            onClick={() => {
+              setShowChangelog(true);
+              if (lastReadVersion !== CURRENT_VERSION) {
+                setLastReadVersion(CURRENT_VERSION);
+                localStorage.setItem("last-read-version", CURRENT_VERSION);
+              }
+            }}
+            className="relative p-1.5 rounded-full hover:bg-white/20 transition"
+            aria-label="更新履歴"
+          >
+            <span className="text-xl">🔔</span>
+            {lastReadVersion !== CURRENT_VERSION && (
+              <span className="absolute top-0.5 right-0.5 w-2 h-2 bg-red-500 rounded-full border border-white" />
+            )}
+          </button>
           <div className="flex bg-white/20 rounded-full p-0.5 text-xs">
             <button
               type="button"
@@ -1244,6 +1327,46 @@ JSONのみ出力してください。` },
           </div>
         </div>
       </header>
+
+      {showChangelog && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-4"
+          onClick={(e) => e.target === e.currentTarget && setShowChangelog(false)}
+        >
+          <div className="bg-white rounded-2xl w-full max-w-md max-h-[85vh] overflow-y-auto shadow-xl">
+            <div className="p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="font-bold text-lg text-amber-700 flex items-center gap-1.5">
+                  <span>🔔</span> 更新履歴
+                </h3>
+                <button
+                  onClick={() => setShowChangelog(false)}
+                  className="text-gray-400 hover:text-gray-600 text-xl"
+                  aria-label="閉じる"
+                >×</button>
+              </div>
+              <div className="space-y-4">
+                {CHANGELOG.map((entry) => (
+                  <div key={entry.version} className="space-y-2">
+                    <div className="flex items-baseline gap-2 border-b border-amber-200 pb-1">
+                      <span className="font-bold text-amber-700">v{entry.version}</span>
+                      <span className="text-xs text-gray-400">{entry.date}</span>
+                    </div>
+                    <ul className="space-y-1 text-sm text-gray-700">
+                      {entry.changes.map((c, i) => (
+                        <li key={i} className="flex gap-2">
+                          <span className="text-amber-400 shrink-0">•</span>
+                          <span className="leading-relaxed">{c}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="max-w-4xl mx-auto p-4 space-y-5">
         {/* ── Pet Info ── */}
@@ -1540,14 +1663,175 @@ JSONのみ出力してください。` },
           const dailyList = savedMenus
             .filter((m) => m.date)
             .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
-          const templateList = savedMenus.filter((m) => !m.date);
           return (
             <>
               {dailyList.length > 0 && (
                 <section className="bg-white rounded-xl shadow p-4 space-y-3">
-                  <h2 className="font-bold text-amber-700 flex items-center gap-1.5">
-                    <span>📅</span> 日付メニュー履歴
-                  </h2>
+                  <div className="flex items-center justify-between gap-2">
+                    <h2 className="font-bold text-amber-700 flex items-center gap-1.5">
+                      <span>📅</span> 日付メニュー履歴
+                    </h2>
+                    <div className="flex gap-1 bg-gray-100 rounded-lg p-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setHistoryView("list")}
+                        className={`text-xs px-2.5 py-1 rounded-md transition ${historyView === "list" ? "bg-white shadow font-medium" : "text-gray-500"}`}
+                      >📋 リスト</button>
+                      <button
+                        type="button"
+                        onClick={() => setHistoryView("calendar")}
+                        className={`text-xs px-2.5 py-1 rounded-md transition ${historyView === "calendar" ? "bg-white shadow font-medium" : "text-gray-500"}`}
+                      >📅 カレンダー</button>
+                    </div>
+                  </div>
+                  {historyView === "calendar" && (() => {
+                    const { year, month } = calendarMonth;
+                    const firstDow = new Date(year, month, 1).getDay();
+                    const daysInMonth = new Date(year, month + 1, 0).getDate();
+                    const today = todayStr();
+                    const byDate = {};
+                    dailyList.forEach((m) => {
+                      if (!byDate[m.date]) byDate[m.date] = [];
+                      byDate[m.date].push(m);
+                    });
+                    const cells = [];
+                    for (let i = 0; i < firstDow; i++) cells.push(null);
+                    for (let d = 1; d <= daysInMonth; d++) {
+                      const ds = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+                      cells.push({ day: d, dateStr: ds, entries: byDate[ds] || [] });
+                    }
+                    while (cells.length % 7 !== 0) cells.push(null);
+                    const prevMonth = () => {
+                      setCalendarMonth(month === 0 ? { year: year - 1, month: 11 } : { year, month: month - 1 });
+                      setCalendarSelectedDate(null);
+                    };
+                    const nextMonth = () => {
+                      setCalendarMonth(month === 11 ? { year: year + 1, month: 0 } : { year, month: month + 1 });
+                      setCalendarSelectedDate(null);
+                    };
+                    const weekdayLabels = ["日", "月", "火", "水", "木", "金", "土"];
+                    return (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <button onClick={prevMonth} className="text-amber-600 hover:bg-amber-50 rounded px-2 py-1 text-sm" aria-label="前の月">◀</button>
+                          <span className="font-medium text-gray-700">{year}年{month + 1}月</span>
+                          <button onClick={nextMonth} className="text-amber-600 hover:bg-amber-50 rounded px-2 py-1 text-sm" aria-label="次の月">▶</button>
+                        </div>
+                        <div className="grid grid-cols-7 gap-0.5 text-[10px] text-gray-500 text-center">
+                          {weekdayLabels.map((w, i) => (
+                            <div key={w} className={`py-0.5 ${i === 0 ? "text-red-500" : i === 6 ? "text-blue-500" : ""}`}>{w}</div>
+                          ))}
+                        </div>
+                        <div className="grid grid-cols-7 gap-0.5">
+                          {cells.map((c, idx) => {
+                            if (!c) return <div key={`empty-${idx}`} className="aspect-square" />;
+                            const isToday = c.dateStr === today;
+                            const isSelected = c.dateStr === calendarSelectedDate;
+                            const hasEntry = c.entries.length > 0;
+                            const dow = idx % 7;
+                            const dateColor = dow === 0 ? "text-red-500" : dow === 6 ? "text-blue-500" : "text-gray-700";
+                            return (
+                              <button
+                                key={c.dateStr}
+                                type="button"
+                                onClick={() => setCalendarSelectedDate(isSelected ? null : c.dateStr)}
+                                className={`aspect-square flex flex-col items-start justify-start p-1 text-left rounded-md border transition ${
+                                  isSelected ? "border-amber-500 bg-amber-100" :
+                                  isToday ? "border-amber-400 bg-amber-50" :
+                                  hasEntry ? "border-gray-200 bg-white hover:bg-amber-50" :
+                                  "border-transparent hover:bg-gray-50"
+                                }`}
+                              >
+                                <span className={`text-[11px] ${dateColor} ${isToday ? "font-bold" : ""}`}>{c.day}</span>
+                                {hasEntry && (
+                                  <div className="w-full flex-1 flex flex-col gap-0.5 mt-0.5 overflow-hidden">
+                                    {c.entries.slice(0, 2).map((e) => (
+                                      <span key={e.id} className="bg-amber-500 text-white text-[9px] px-1 rounded truncate leading-tight">{e.petName || "—"}</span>
+                                    ))}
+                                    {c.entries.length > 2 && (
+                                      <span className="text-[9px] text-gray-400 leading-tight">+{c.entries.length - 2}</span>
+                                    )}
+                                  </div>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {calendarSelectedDate && (() => {
+                          const entries = byDate[calendarSelectedDate] || [];
+                          const [y, mo, dd] = calendarSelectedDate.split("-").map(Number);
+                          const label = `${mo}月${dd}日`;
+                          return (
+                            <div className="mt-3 pt-3 border-t border-gray-100 space-y-2">
+                              <p className="text-xs text-gray-500">{label}のメニュー {entries.length > 0 ? `(${entries.length}件)` : ""}</p>
+                              {entries.length === 0 ? (
+                                <p className="text-xs text-gray-400 text-center py-2">この日のメニューはありません</p>
+                              ) : entries.map((m) => (
+                                <div key={m.id} className="bg-gray-50 rounded-lg px-3 py-3 space-y-1.5">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-medium truncate">{m.petName || "未設定"}</span>
+                                    <span className="text-xs text-gray-400 ml-auto shrink-0">{m.items?.length || 0}商品</span>
+                                  </div>
+                                  {m.note && editingMemoId !== m.id && (
+                                    <p className="text-xs text-gray-600 bg-amber-50 px-2 py-1 rounded whitespace-pre-wrap">📝 {m.note}</p>
+                                  )}
+                                  {editingMemoId === m.id && (
+                                    <div className="space-y-1.5">
+                                      <textarea
+                                        value={editingMemoDraft}
+                                        onChange={(e) => setEditingMemoDraft(e.target.value)}
+                                        placeholder="例: 朝は食欲なし、午後完食"
+                                        rows={2}
+                                        autoFocus
+                                        className="w-full text-xs border border-amber-300 rounded-lg px-2 py-1 focus:ring-2 focus:ring-amber-400 focus:outline-none bg-amber-50"
+                                      />
+                                      <div className="flex items-center gap-2 justify-end">
+                                        <button
+                                          onClick={async () => {
+                                            await updateMenuNote(m.id, editingMemoDraft);
+                                            setEditingMemoId(null);
+                                            setEditingMemoDraft("");
+                                          }}
+                                          className="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1 rounded-lg transition"
+                                        >保存</button>
+                                        <button
+                                          onClick={() => { setEditingMemoId(null); setEditingMemoDraft(""); }}
+                                          className="text-gray-400 hover:text-gray-600 text-xs px-2 py-1"
+                                        >キャンセル</button>
+                                      </div>
+                                    </div>
+                                  )}
+                                  <div className="flex items-center gap-2 justify-end">
+                                    <button
+                                      onClick={() => loadMenu(m)}
+                                      className="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1.5 rounded-lg transition"
+                                    >表示する</button>
+                                    <button
+                                      onClick={() => {
+                                        if (editingMemoId === m.id) {
+                                          setEditingMemoId(null);
+                                          setEditingMemoDraft("");
+                                        } else {
+                                          setEditingMemoId(m.id);
+                                          setEditingMemoDraft(m.note || "");
+                                        }
+                                      }}
+                                      className="bg-white border border-amber-400 text-amber-700 hover:bg-amber-50 text-xs px-3 py-1.5 rounded-lg transition"
+                                    >{m.note ? "📝 メモ編集" : "＋ メモ"}</button>
+                                    <button
+                                      onClick={() => deleteSavedMenu(m.id)}
+                                      className="text-red-400 hover:text-red-600 text-xs px-2 py-1.5"
+                                    >削除</button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    );
+                  })()}
+                  {historyView === "list" && (
                   <ul className="space-y-2">
                     {dailyList.map((m) => {
                       const d = new Date(m.date + "T00:00:00");
@@ -1559,14 +1843,52 @@ JSONのみ出力してください。` },
                             <span className="font-medium truncate">{m.petName || "未設定"}</span>
                             <span className="text-xs text-gray-400 ml-auto shrink-0">{m.items?.length || 0}商品</span>
                           </div>
-                          {m.note && (
+                          {m.note && editingMemoId !== m.id && (
                             <p className="text-xs text-gray-600 bg-amber-50 px-2 py-1 rounded whitespace-pre-wrap">📝 {m.note}</p>
+                          )}
+                          {editingMemoId === m.id && (
+                            <div className="space-y-1.5">
+                              <textarea
+                                value={editingMemoDraft}
+                                onChange={(e) => setEditingMemoDraft(e.target.value)}
+                                placeholder="例: 朝は食欲なし、午後完食"
+                                rows={2}
+                                autoFocus
+                                className="w-full text-xs border border-amber-300 rounded-lg px-2 py-1 focus:ring-2 focus:ring-amber-400 focus:outline-none bg-amber-50"
+                              />
+                              <div className="flex items-center gap-2 justify-end">
+                                <button
+                                  onClick={async () => {
+                                    await updateMenuNote(m.id, editingMemoDraft);
+                                    setEditingMemoId(null);
+                                    setEditingMemoDraft("");
+                                  }}
+                                  className="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1 rounded-lg transition"
+                                >保存</button>
+                                <button
+                                  onClick={() => { setEditingMemoId(null); setEditingMemoDraft(""); }}
+                                  className="text-gray-400 hover:text-gray-600 text-xs px-2 py-1"
+                                >キャンセル</button>
+                              </div>
+                            </div>
                           )}
                           <div className="flex items-center gap-2 justify-end">
                             <button
                               onClick={() => loadMenu(m)}
                               className="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1.5 rounded-lg transition"
-                            >読み込む</button>
+                            >表示する</button>
+                            <button
+                              onClick={() => {
+                                if (editingMemoId === m.id) {
+                                  setEditingMemoId(null);
+                                  setEditingMemoDraft("");
+                                } else {
+                                  setEditingMemoId(m.id);
+                                  setEditingMemoDraft(m.note || "");
+                                }
+                              }}
+                              className="bg-white border border-amber-400 text-amber-700 hover:bg-amber-50 text-xs px-3 py-1.5 rounded-lg transition"
+                            >{m.note ? "📝 メモ編集" : "＋ メモ"}</button>
                             <button
                               onClick={() => deleteSavedMenu(m.id)}
                               className="text-red-400 hover:text-red-600 text-xs px-2 py-1.5"
@@ -1576,52 +1898,123 @@ JSONのみ出力してください。` },
                       );
                     })}
                   </ul>
+                  )}
                 </section>
               )}
-              {templateList.length > 0 && (
-                <section className="bg-white rounded-xl shadow p-4 space-y-3">
-                  <h2 className="font-bold text-amber-700 flex items-center gap-1.5">
-                    <span>📋</span> テンプレートメニュー
-                  </h2>
-                  <ul className="space-y-2">
-                    {templateList.map((m, idx) => (
-                      <li key={m.id} className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-3">
-                        <div className="flex flex-col gap-0.5">
-                          <button
-                            onClick={() => moveSavedMenu(savedMenus.indexOf(m), -1)}
-                            disabled={idx === 0}
-                            className="text-gray-400 hover:text-amber-600 disabled:opacity-20 text-sm leading-none p-0.5 transition"
-                            aria-label="上に移動"
-                          >▲</button>
-                          <button
-                            onClick={() => moveSavedMenu(savedMenus.indexOf(m), 1)}
-                            disabled={idx === templateList.length - 1}
-                            className="text-gray-400 hover:text-amber-600 disabled:opacity-20 text-sm leading-none p-0.5 transition"
-                            aria-label="下に移動"
-                          >▼</button>
+              {dailyList.length > 0 && (() => {
+                const petNames = [...new Set(dailyList.map((m) => m.petName).filter(Boolean))];
+                const from = statFrom || (() => {
+                  const d = new Date(); d.setDate(d.getDate() - 6);
+                  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+                })();
+                const to = statTo || todayStr();
+                const filtered = dailyList.filter((m) => {
+                  if (m.date < from || m.date > to) return false;
+                  if (statPet !== "__all__" && m.petName !== statPet) return false;
+                  return true;
+                });
+                const kcalOf = (items) => (items || []).reduce((acc, it) => {
+                  const kPer100 = it.food?.kcalPer100g || 0;
+                  const amt = it.amount || 0;
+                  return acc + (kPer100 * amt) / 100;
+                }, 0);
+                const perDate = {};
+                filtered.forEach((m) => {
+                  const k = kcalOf(m.items);
+                  if (!perDate[m.date]) perDate[m.date] = 0;
+                  perDate[m.date] += k;
+                });
+                const rangeDates = [];
+                {
+                  const sd = new Date(from + "T00:00:00");
+                  const ed = new Date(to + "T00:00:00");
+                  for (let cur = new Date(sd); cur <= ed; cur.setDate(cur.getDate() + 1)) {
+                    rangeDates.push(`${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, "0")}-${String(cur.getDate()).padStart(2, "0")}`);
+                  }
+                }
+                const includedDates = rangeDates.filter((d) => (perDate[d] || 0) > 0);
+                const excludedDates = rangeDates.filter((d) => !((perDate[d] || 0) > 0));
+                const days = includedDates.length;
+                const totalKcal = includedDates.reduce((s, d) => s + perDate[d], 0);
+                const avg = days > 0 ? totalKcal / days : 0;
+                const fmtDateShort = (ds) => {
+                  const [, mo, dd] = ds.split("-").map(Number);
+                  return `${mo}月${dd}日`;
+                };
+                return (
+                  <section className="bg-white rounded-xl shadow p-4 space-y-3">
+                    <button
+                      type="button"
+                      onClick={() => setShowStats((s) => !s)}
+                      className="w-full flex items-center justify-between"
+                    >
+                      <h2 className="font-bold text-amber-700 flex items-center gap-1.5">
+                        <span>📊</span> 期間平均カロリー
+                      </h2>
+                      <span className="text-amber-600 text-sm">{showStats ? "▲" : "▼"}</span>
+                    </button>
+                    {showStats && (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-2">
+                          <label className="block">
+                            <span className="text-xs text-gray-500">開始日</span>
+                            <input
+                              type="date"
+                              value={from}
+                              onChange={(e) => setStatFrom(e.target.value)}
+                              className="mt-0.5 w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:ring-2 focus:ring-amber-400 focus:outline-none"
+                            />
+                          </label>
+                          <label className="block">
+                            <span className="text-xs text-gray-500">終了日</span>
+                            <input
+                              type="date"
+                              value={to}
+                              onChange={(e) => setStatTo(e.target.value)}
+                              className="mt-0.5 w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:ring-2 focus:ring-amber-400 focus:outline-none"
+                            />
+                          </label>
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="font-medium truncate">{m.name}</p>
-                          <p className="text-xs text-gray-400">
-                            {m.petName || "未設定"} / {m.items?.length || 0}商品
-                            {m.savedAt && ` / ${new Date(m.savedAt).toLocaleDateString("ja-JP")}`}
+                        {petNames.length > 1 && (
+                          <label className="block">
+                            <span className="text-xs text-gray-500">ペット</span>
+                            <select
+                              value={statPet}
+                              onChange={(e) => setStatPet(e.target.value)}
+                              className="mt-0.5 w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:ring-2 focus:ring-amber-400 focus:outline-none"
+                            >
+                              <option value="__all__">全員</option>
+                              {petNames.map((p) => <option key={p} value={p}>{p}</option>)}
+                            </select>
+                          </label>
+                        )}
+                        <div className="bg-amber-50 rounded-lg p-3 grid grid-cols-3 gap-2 text-center">
+                          <div>
+                            <p className="text-[10px] text-gray-500">1日平均</p>
+                            <p className="text-lg font-bold text-amber-700">{fmt(avg)} <span className="text-xs font-normal">kcal</span></p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-gray-500">合計</p>
+                            <p className="text-lg font-bold text-amber-700">{fmt(totalKcal)} <span className="text-xs font-normal">kcal</span></p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-gray-500">対象日数</p>
+                            <p className="text-lg font-bold text-amber-700">{days} <span className="text-xs font-normal">日</span></p>
+                          </div>
+                        </div>
+                        {days === 0 && (
+                          <p className="text-xs text-gray-400 text-center">この期間のメニューはありません</p>
+                        )}
+                        {excludedDates.length > 0 && days > 0 && (
+                          <p className="text-[11px] text-gray-500 leading-relaxed">
+                            備考: {excludedDates.map(fmtDateShort).join("、")}は入力がなかったため除外しています
                           </p>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <button
-                            onClick={() => loadMenu(m)}
-                            className="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1.5 rounded-lg transition"
-                          >読み込む</button>
-                          <button
-                            onClick={() => deleteSavedMenu(m.id)}
-                            className="text-red-400 hover:text-red-600 text-xs px-2 py-1.5"
-                          >削除</button>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              )}
+                        )}
+                      </div>
+                    )}
+                  </section>
+                );
+              })()}
             </>
           );
         })()}
@@ -1642,21 +2035,6 @@ JSONのみ出力してください。` },
             </button>
           ) : (
             <div className="bg-white border-2 border-amber-400 rounded-xl p-4 space-y-3">
-              {/* Type selector */}
-              <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
-                <button
-                  type="button"
-                  onClick={() => setSaveType("daily")}
-                  className={`flex-1 text-sm py-1.5 rounded-md transition ${saveType === "daily" ? "bg-white shadow font-medium" : "text-gray-500"}`}
-                >📅 ○月○日のメニュー</button>
-                <button
-                  type="button"
-                  onClick={() => setSaveType("template")}
-                  className={`flex-1 text-sm py-1.5 rounded-md transition ${saveType === "template" ? "bg-white shadow font-medium" : "text-gray-500"}`}
-                >📋 テンプレート</button>
-              </div>
-
-              {saveType === "daily" ? (
                 <div className="space-y-2">
                   <label className="block">
                     <span className="text-xs text-gray-500">日付</span>
@@ -1704,30 +2082,6 @@ JSONのみ出力してください。` },
                   </div>
                   <p className="text-[11px] text-gray-400">同じ日付・同じペット名で保存済みがあれば自動上書き</p>
                 </div>
-              ) : (
-                <div className="space-y-2">
-                  <p className="font-medium text-amber-700 text-sm">テンプレート名を入力してください</p>
-                  <div className="flex gap-2">
-                    <input
-                      className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-400 focus:outline-none"
-                      placeholder="例: 療法食メニュー"
-                      value={saveMenuName}
-                      onChange={(e) => setSaveMenuName(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && saveCurrentMenu()}
-                      autoFocus
-                    />
-                    <button
-                      onClick={saveCurrentMenu}
-                      disabled={!saveMenuName.trim()}
-                      className="bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 text-white px-4 py-2 rounded-lg font-medium transition"
-                    >保存</button>
-                    <button
-                      onClick={() => { setShowSaveForm(false); setSaveMenuName(""); }}
-                      className="text-gray-400 hover:text-gray-600 px-2"
-                    >×</button>
-                  </div>
-                </div>
-              )}
             </div>
           )}
 
