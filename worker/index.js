@@ -180,6 +180,42 @@ function jsonResponse(data, status, headers) {
   });
 }
 
+// Gemini モデル自動フォールバック
+// 503/500 や 404（モデル廃止）で次のモデルに救済、401/403/400 は即返却
+const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-1.5-flash"];
+
+async function callGeminiWithFallback(geminiKey, requestBody) {
+  let lastError = null;
+  for (const model of GEMINI_MODELS) {
+    try {
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestBody),
+        }
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        return { ok: true, data, model };
+      }
+      const errBody = await resp.text().catch(() => "");
+      console.log(`[Gemini] ${model} failed ${resp.status}: ${errBody.slice(0, 160)}`);
+      lastError = { status: resp.status, body: errBody.slice(0, 400), model };
+      // 401/403/400 はAPIキーやリクエスト自体の問題でモデル変えても無駄
+      if (resp.status === 400 || resp.status === 401 || resp.status === 403) {
+        return { ok: false, error: lastError };
+      }
+      // 404 (モデル廃止) / 429 (レート超過) / 5xx は次のモデルへ
+    } catch (e) {
+      console.log(`[Gemini] ${model} threw: ${e.message}`);
+      lastError = { status: 0, body: String(e).slice(0, 400), model };
+    }
+  }
+  return { ok: false, error: lastError };
+}
+
 export default {
   async fetch(request, env) {
     const origin = request.headers.get("Origin") || "";
@@ -469,28 +505,25 @@ export default {
       }
 
       try {
-        const resp = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{
-                parts: [
-                  { text: SCAN_PROMPT },
-                  { inlineData: { mimeType, data: imageBase64 } },
-                ],
-              }],
-              generationConfig: { temperature: 0.1 },
-            }),
-          }
-        );
+        const result = await callGeminiWithFallback(geminiKey, {
+          contents: [{
+            parts: [
+              { text: SCAN_PROMPT },
+              { inlineData: { mimeType, data: imageBase64 } },
+            ],
+          }],
+          generationConfig: { temperature: 0.1 },
+        });
 
-        if (!resp.ok) {
-          return jsonResponse({ error: "画像解析に失敗しました" }, 502, headers);
+        if (!result.ok) {
+          const isOverload = result.error?.status === 503;
+          const msg = isOverload
+            ? "Google AIサーバーが一時的に混み合っています。数分後にもう一度お試しください。"
+            : "画像解析に失敗しました";
+          return jsonResponse({ error: msg, debug: result.error }, 502, headers);
         }
 
-        const data = await resp.json();
+        const data = result.data;
         const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
         const jsonMatch = text.match(/\{[\s\S]*\}/);
 
@@ -565,29 +598,27 @@ export default {
 
     try {
       const prompt = GEMINI_PROMPT.replace("__NAME__", productName);
-      const resp = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.1 },
-            tools: [{ googleSearch: {} }],
-          }),
-        }
-      );
+      const result = await callGeminiWithFallback(geminiKey, {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.1 },
+        tools: [{ googleSearch: {} }],
+      });
 
-      if (!resp.ok) {
-        return jsonResponse({ error: "AI検索に失敗しました" }, 502, headers);
+      if (!result.ok) {
+        const isOverload = result.error?.status === 503;
+        const msg = isOverload
+          ? "Google AIサーバーが一時的に混み合っています。数分後にもう一度お試しください。"
+          : "AI検索に失敗しました";
+        return jsonResponse({ error: msg, debug: result.error }, 502, headers);
       }
 
-      const data = await resp.json();
+      const data = result.data;
       const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
       const jsonMatch = text.match(/\{[\s\S]*\}/);
 
       if (!jsonMatch) {
-        return jsonResponse({ error: "成分情報を取得できませんでした" }, 404, headers);
+        console.log("[AI search] No JSON. model:", result.model, "finishReason:", data?.candidates?.[0]?.finishReason);
+        return jsonResponse({ error: "成分情報を取得できませんでした", debug: { text: text.slice(0, 200), finishReason: data?.candidates?.[0]?.finishReason, model: result.model } }, 404, headers);
       }
 
       // 原子的にレート制限カウンタをインクリメント（競合を正しく検知）
