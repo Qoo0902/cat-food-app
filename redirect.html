@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#F59E0B">
+  <title>くぅの食事管理アプリ — 移転しました</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif;
+      background: linear-gradient(135deg, #fef3c7 0%, #fed7aa 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      color: #78350f;
+    }
+    .card {
+      background: white;
+      border-radius: 24px;
+      padding: 32px 24px;
+      max-width: 460px;
+      width: 100%;
+      box-shadow: 0 12px 32px rgba(0,0,0,0.1);
+    }
+    .header { text-align: center; margin-bottom: 24px; }
+    .emoji { font-size: 56px; line-height: 1; }
+    h1 {
+      font-size: 1.4rem;
+      color: #92400e;
+      margin: 12px 0 8px;
+    }
+    .lead {
+      color: #78350f;
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+    .url-box {
+      background: #fef3c7;
+      padding: 14px 16px;
+      border-radius: 12px;
+      margin: 20px 0;
+      text-align: center;
+      word-break: break-all;
+    }
+    .url-box a {
+      color: #d97706;
+      font-weight: 700;
+      font-size: 1.05rem;
+      text-decoration: none;
+    }
+    .data-section {
+      margin-top: 24px;
+      padding-top: 20px;
+      border-top: 2px dashed #fbbf24;
+    }
+    .alert {
+      background: #fff1f2;
+      border: 2px solid #fda4af;
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 16px;
+      color: #9f1239;
+      font-size: 0.9rem;
+      line-height: 1.6;
+      font-weight: 600;
+    }
+    .code-box {
+      background: #f0fdf4;
+      border: 2px solid #86efac;
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin: 12px 0;
+      text-align: center;
+    }
+    .code-box .label {
+      font-size: 0.8rem;
+      color: #15803d;
+      margin-bottom: 6px;
+    }
+    .code-box .code {
+      font-family: ui-monospace, monospace;
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: #14532d;
+      letter-spacing: 0.15em;
+    }
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 14px 20px;
+      border-radius: 12px;
+      text-align: center;
+      text-decoration: none;
+      font-weight: 700;
+      font-size: 1rem;
+      margin-top: 12px;
+      transition: transform 0.1s, box-shadow 0.1s;
+      border: none;
+      cursor: pointer;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #f59e0b, #ea580c);
+      color: white;
+      box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);
+    }
+    .btn-primary:active {
+      transform: translateY(1px);
+      box-shadow: 0 2px 6px rgba(245, 158, 11, 0.3);
+    }
+    .btn-secondary {
+      background: #f3f4f6;
+      color: #4b5563;
+    }
+    .help {
+      margin-top: 16px;
+      font-size: 0.8rem;
+      color: #92400e;
+      line-height: 1.6;
+    }
+    .help ul { padding-left: 20px; margin-top: 6px; }
+    .help li { margin: 4px 0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <div class="emoji">🐱🐶</div>
+      <h1>くぅの食事管理アプリは<br>新しいURLに移転しました</h1>
+    </div>
+
+    <p class="lead">これまでのこちらのURLは利用を終了しました。今後は下の新しいURLをご利用ください。</p>
+
+    <div class="url-box">
+      <a href="https://cat-food-app.pages.dev/">cat-food-app.pages.dev</a>
+    </div>
+
+    <div class="data-section" id="dataSection">
+      <p style="text-align:center;color:#92400e;">データ確認中...</p>
+    </div>
+
+    <div class="help">
+      <p><strong>📱 ホーム画面のアイコンも更新を:</strong></p>
+      <ul>
+        <li>古い白いアイコンは長押しして削除</li>
+        <li>新URLを Safari で開く → 共有 → 「ホーム画面に追加」</li>
+        <li>新しい猫犬アイコンが表示されます</li>
+      </ul>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      const NEW_URL = "https://cat-food-app.pages.dev/";
+      const dataSection = document.getElementById("dataSection");
+
+      // Try to read existing backup-code from localStorage (works because we are on the same origin)
+      let code = null;
+      try {
+        const raw = localStorage.getItem("backup-code");
+        if (raw) {
+          // App stores it as JSON-encoded string
+          code = JSON.parse(raw);
+        }
+      } catch (e) {}
+
+      // Cookie fallback (the app also stores backup-code in a cookie)
+      if (!code) {
+        try {
+          const m = document.cookie.match(/(?:^|; )catfood-backup=([^;]+)/);
+          if (m) code = decodeURIComponent(m[1]);
+        } catch (e) {}
+      }
+
+      if (code) {
+        // User has previously used the old URL → offer 1-click data migration
+        const migrateUrl = NEW_URL + "?migrate=" + encodeURIComponent(code);
+        dataSection.innerHTML = `
+          <div class="alert">
+            ⚠️ 過去にこのURLでアプリを使われていた方へ<br>
+            データを新URLに引き継ぎましょう（1クリック）
+          </div>
+          <div class="code-box">
+            <div class="label">あなたのバックアップコード</div>
+            <div class="code">${escapeHTML(code)}</div>
+          </div>
+          <a href="${migrateUrl}" class="btn btn-primary">📦 データを新URLに自動移行する</a>
+          <a href="${NEW_URL}" class="btn btn-secondary">データなしで新URLを開く</a>
+          <p class="help" style="margin-top:14px;">
+            「自動移行」ボタンを押すと、新URLに移動した後、ライセンスコードを入力すれば自動的にあなたのデータ（フード一覧・履歴等）が復元されます。
+          </p>
+        `;
+      } else {
+        // No prior usage → just send them to the new URL
+        dataSection.innerHTML = `
+          <a href="${NEW_URL}" class="btn btn-primary">▶ 新URLで開く</a>
+        `;
+      }
+
+      function escapeHTML(s) {
+        return String(s).replace(/[&<>"']/g, c => ({
+          '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        })[c]);
+      }
+    })();
+  </script>
+</body>
+</html>
